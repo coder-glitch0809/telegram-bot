@@ -36,6 +36,7 @@ AI_API_KEY = GROK_API_KEY or OPENAI_API_KEY
 AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.x.ai/v1" if GROK_API_KEY else "").strip()
 
 GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "google-service-account.json").strip()
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 GOOGLE_DRIVE_PARENT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_PARENT_FOLDER_ID", "").strip()
 SHARE_SPREADSHEET_WITH_EMAIL = os.getenv("SHARE_SPREADSHEET_WITH_EMAIL", "").strip()
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "grok-4.20-reasoning" if GROK_API_KEY else "gpt-4o-mini").strip()
@@ -303,10 +304,16 @@ class ExpenseSheets:
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ]
-        credentials = Credentials.from_service_account_file(
-            GOOGLE_SERVICE_ACCOUNT_FILE,
-            scopes=scopes,
-        )
+        if GOOGLE_SERVICE_ACCOUNT_JSON:
+            credentials = Credentials.from_service_account_info(
+                json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+                scopes=scopes,
+            )
+        else:
+            credentials = Credentials.from_service_account_file(
+                GOOGLE_SERVICE_ACCOUNT_FILE,
+                scopes=scopes,
+            )
         self.client = gspread.authorize(credentials)
 
     def _spreadsheet_title(self, user_id: int, username: str) -> str:
@@ -363,8 +370,8 @@ def require_config() -> None:
         missing.append("TELEGRAM_BOT_TOKEN")
     if not AI_API_KEY:
         missing.append("GROK_API_KEY yoki OPENAI_API_KEY")
-    if not Path(GOOGLE_SERVICE_ACCOUNT_FILE).exists():
-        missing.append("GOOGLE_SERVICE_ACCOUNT_FILE")
+    if not GOOGLE_SERVICE_ACCOUNT_JSON and not Path(GOOGLE_SERVICE_ACCOUNT_FILE).exists():
+        missing.append("GOOGLE_SERVICE_ACCOUNT_JSON yoki GOOGLE_SERVICE_ACCOUNT_FILE")
     if missing:
         joined = ", ".join(missing)
         raise RuntimeError(f"Sozlanmagan yoki topilmadi: {joined}. .env.example faylini ko'ring.")

@@ -54,7 +54,35 @@ pip install -r requirements.txt
 python bot.py
 ```
 
-## 5. Bot buyruqlari
+## 5. Vercelga deploy qilish
+
+Vercel Python entrypoint qidiradi, shuning uchun loyiha ichida `app.py` bor. Vercelda Environment Variables qilib quyidagilarni qo'shing:
+
+```env
+TELEGRAM_BOT_TOKEN=...
+GROK_API_KEY=...
+AI_BASE_URL=https://api.x.ai/v1
+GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+GOOGLE_DRIVE_PARENT_FOLDER_ID=...
+SHARE_SPREADSHEET_WITH_EMAIL=...
+EXPENSE_ALLOWED_USER_IDS=...
+OWNER_EMAIL=...
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=...
+SMTP_PASSWORD=...
+SMTP_FROM_EMAIL=...
+```
+
+Deploydan keyin Telegram webhookni Vercel domeningizga ulang:
+
+```text
+https://api.telegram.org/botBOT_TOKEN/setWebhook?url=https://YOUR-VERCEL-DOMAIN.vercel.app/telegram-webhook
+```
+
+Vercelda polling (`python bot.py`) ishlatilmaydi; u faqat lokal yoki doimiy server uchun.
+
+## 6. Bot buyruqlari
 
 ```text
 /start
@@ -69,7 +97,7 @@ python bot.py
 
 Ovozli xarajat yuborsangiz, bot avval ovozni matnga aylantiradi, keyin xarajatni Google Sheets ga yozadi.
 
-## 6. Foydalanuvchi statistikasi va email hisobot
+## 7. Foydalanuvchi statistikasi va email hisobot
 
 Bot hammaga ochiq: kim `/start` bossa yoki oddiy savol yozsa AI bilan ishlata oladi. Har bir foydalanuvchi va so'rov qisqacha `bot_analytics.sqlite3` bazaga yoziladi:
 
@@ -91,7 +119,7 @@ REPORT_WEEKLY_DAY=0
 
 Bot haftada bir marta qisqa faollik hisobotini, har oyning 1-kuni esa oldingi oy bo'yicha umumiy hisobotni emailga yuboradi. Gmail uchun `SMTP_PASSWORD` sifatida Google App Password ishlating.
 
-## 7. Keyinchalik payment ulash
+## 8. Keyinchalik payment ulash
 
 Obunachilar ko'payganda to'lov tizimi uchun quyidagi joy kengaytiriladi:
 
