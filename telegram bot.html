@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Telegram Bot sozlash</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            color: #16211f;
+            background: #f5f7f6;
+            line-height: 1.55;
+        }
+
+        main {
+            max-width: 920px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        section {
+            padding: 22px 0;
+            border-bottom: 1px solid #dce5e1;
+        }
+
+        h1 {
+            font-size: 34px;
+            margin: 0 0 12px;
+        }
+
+        h2 {
+            font-size: 22px;
+            margin: 0 0 10px;
+        }
+
+        code, pre {
+            background: #e9efec;
+            border-radius: 6px;
+        }
+
+        code {
+            padding: 2px 6px;
+        }
+
+        pre {
+            overflow-x: auto;
+            padding: 14px;
+        }
+
+        .note {
+            font-weight: 700;
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <section>
+            <h1>AI Telegram Bot + Google Sheets xarajatlar</h1>
+            <p>Asosiy kod <code>bot.py</code> faylida. Bu HTML sahifa faqat sozlash yo'riqnomasi.</p>
+        </section>
+
+        <section>
+            <h2>API key joyi</h2>
+            <p class="note">Adashmaslik uchun Telegram bot tokeni va OpenAI API key bitta joyda turadi: <code>.env</code>.</p>
+            <pre>TELEGRAM_BOT_TOKEN=PASTE_TELEGRAM_BOT_TOKEN_HERE
+OPENAI_API_KEY=PASTE_OPENAI_API_KEY_HERE</pre>
+        </section>
+
+        <section>
+            <h2>Google Sheets</h2>
+            <p>Service account JSON faylini shu papkaga <code>google-service-account.json</code> nomi bilan qo'ying.</p>
+            <pre>GOOGLE_SERVICE_ACCOUNT_FILE=google-service-account.json
+SHARE_SPREADSHEET_WITH_EMAIL=sizning_gmailingiz@gmail.com</pre>
+        </section>
+
+        <section>
+            <h2>Ishga tushirish</h2>
+            <pre>python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python bot.py</pre>
+        </section>
+
+        <section>
+            <h2>Buyruqlar</h2>
+            <pre>/start
+/ai savol
+/expense 25000 taksi
+/month
+/month 2026-05</pre>
+            <p>Ovozli xabar yuborilsa, bot ovozni matnga aylantirib xarajat sifatida Google Sheets ga yozadi.</p>
+        </section>
+    </main>
+</body>
+</html>
