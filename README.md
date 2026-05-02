@@ -10,11 +10,13 @@ Eng muhim joy shu:
 
 ```env
 TELEGRAM_BOT_TOKEN=PASTE_TELEGRAM_BOT_TOKEN_HERE
-GROK_API_KEY=PASTE_GROK_API_KEY_HERE
-AI_BASE_URL=https://api.x.ai/v1
+AI_PROVIDER=groq
+GROQ_API_KEY=PASTE_GROQ_API_KEY_HERE
+AI_BASE_URL=https://api.groq.com/openai/v1
+OPENAI_TEXT_MODEL=llama-3.3-70b-versatile
 ```
 
-Telegram bot tokenini `@BotFather` beradi. Grok API key esa xAI console ichidan olinadi.
+Telegram bot tokenini `@BotFather` beradi. `gsk_` bilan boshlanadigan kalit odatda Groq API kaliti bo'ladi. Agar xAI Grok ishlatsangiz `AI_PROVIDER=xai`, `GROK_API_KEY=...`, `AI_BASE_URL=https://api.x.ai/v1` qiling.
 
 ## 2. Google Sheets ulash
 
@@ -60,8 +62,10 @@ Vercel Python entrypoint qidiradi, shuning uchun loyiha ichida `app.py` bor. Ver
 
 ```env
 TELEGRAM_BOT_TOKEN=...
-GROK_API_KEY=...
-AI_BASE_URL=https://api.x.ai/v1
+AI_PROVIDER=groq
+GROQ_API_KEY=...
+AI_BASE_URL=https://api.groq.com/openai/v1
+OPENAI_TEXT_MODEL=llama-3.3-70b-versatile
 GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
 GOOGLE_DRIVE_PARENT_FOLDER_ID=...
 SHARE_SPREADSHEET_WITH_EMAIL=...
@@ -72,6 +76,9 @@ SMTP_PORT=587
 SMTP_USERNAME=...
 SMTP_PASSWORD=...
 SMTP_FROM_EMAIL=...
+PAYMENT_ENABLED=false
+PAYMENT_PROVIDER=manual
+PAYMENT_OWNER_CONTACT=@username_yoki_telefon
 ```
 
 Deploydan keyin Telegram webhookni Vercel domeningizga ulang:
@@ -80,12 +87,32 @@ Deploydan keyin Telegram webhookni Vercel domeningizga ulang:
 https://api.telegram.org/botBOT_TOKEN/setWebhook?url=https://YOUR-VERCEL-DOMAIN.vercel.app/telegram-webhook
 ```
 
+Yoki brauzerdan shu endpointni oching:
+
+```text
+https://YOUR-VERCEL-DOMAIN.vercel.app/setup-webhook?url=https://YOUR-VERCEL-DOMAIN.vercel.app/telegram-webhook
+```
+
+Vercel sozlamalari to'g'riligini tekshirish:
+
+```text
+https://YOUR-VERCEL-DOMAIN.vercel.app/status
+```
+
+Telegram webhook ulanganini tekshirish:
+
+```text
+https://YOUR-VERCEL-DOMAIN.vercel.app/webhook-info
+```
+
 Vercelda polling (`python bot.py`) ishlatilmaydi; u faqat lokal yoki doimiy server uchun.
 
 ## 6. Bot buyruqlari
 
 ```text
 /start
+/setting
+/payment
 /help
 /ai savolingiz
 /expense 25000 taksi
@@ -129,5 +156,5 @@ Obunachilar ko'payganda to'lov tizimi uchun quyidagi joy kengaytiriladi:
 - AI so'rovlar limitlari;
 - faqat to'laganlarga AI ishlatish.
 
-Hozirgi kodda oddiy foydalanuvchilar AI bilan ishlay oladi, xarajat yozish esa `EXPENSE_ALLOWED_USER_IDS` orqali cheklanadi.
+Hozir `PAYMENT_ENABLED=false`, shuning uchun oddiy foydalanuvchilar AI bilan ishlay oladi. Keyin to'lovni yoqish uchun Vercelda `PAYMENT_ENABLED=true` va provider sozlamalarini kiritasiz.
 # telegram-bot
