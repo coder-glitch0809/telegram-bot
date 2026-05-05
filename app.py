@@ -22,7 +22,7 @@ async def status() -> dict[str, object]:
         "status": "ok",
         "telegram_token": bool(telegram_bot.TELEGRAM_BOT_TOKEN),
         "ai_provider": telegram_bot.AI_PROVIDER,
-        "ai_model": telegram_bot.OPENAI_TEXT_MODEL,
+        "ai_model": telegram_bot.AI_TEXT_MODEL,
         "ai_key": bool(telegram_bot.AI_API_KEY),
         "google_sheets": bool(
             telegram_bot.GOOGLE_SERVICE_ACCOUNT_JSON
@@ -30,6 +30,26 @@ async def status() -> dict[str, object]:
         ),
         "payment_enabled": telegram_bot.PAYMENT_ENABLED,
     }
+
+
+@app.get("/ai-health")
+async def ai_health() -> dict[str, object]:
+    try:
+        answer = await telegram_bot.ask_ai("Faqat bitta so'z bilan javob ber: OK")
+        return {
+            "ok": True,
+            "provider": telegram_bot.AI_PROVIDER,
+            "model": telegram_bot.AI_TEXT_MODEL,
+            "answer": answer[:100],
+        }
+    except Exception as exc:
+        telegram_bot.logger.exception("AI health check failed")
+        return {
+            "ok": False,
+            "provider": telegram_bot.AI_PROVIDER,
+            "model": telegram_bot.AI_TEXT_MODEL,
+            "error": telegram_bot.friendly_error(exc),
+        }
 
 
 async def get_bot_application():
@@ -52,8 +72,10 @@ async def get_bot_application():
 
 
 @app.get("/setup-webhook")
-async def setup_webhook(url: str) -> dict[str, object]:
+async def setup_webhook(request: Request, url: str | None = None) -> dict[str, object]:
     application = await get_bot_application()
+    if not url:
+        url = str(request.url_for("telegram_webhook"))
     ok = await application.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES)
     return {"ok": ok, "webhook_url": url}
 

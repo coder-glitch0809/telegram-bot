@@ -10,13 +10,13 @@ Eng muhim joy shu:
 
 ```env
 TELEGRAM_BOT_TOKEN=PASTE_TELEGRAM_BOT_TOKEN_HERE
-AI_PROVIDER=groq
-GROQ_API_KEY=PASTE_GROQ_API_KEY_HERE
-AI_BASE_URL=https://api.groq.com/openai/v1
-OPENAI_TEXT_MODEL=llama-3.3-70b-versatile
+AI_PROVIDER=gemini
+GEMINI_API_KEY=PASTE_GEMINI_API_KEY_HERE
+AI_TEXT_MODEL=gemini-2.0-flash
+AI_BASE_URL=
 ```
 
-Telegram bot tokenini `@BotFather` beradi. `gsk_` bilan boshlanadigan kalit odatda Groq API kaliti bo'ladi. Agar xAI Grok ishlatsangiz `AI_PROVIDER=xai`, `GROK_API_KEY=...`, `AI_BASE_URL=https://api.x.ai/v1` qiling.
+Telegram bot tokenini `@BotFather` beradi. Gemini API kalitini Google AI Studio dan oling: https://aistudio.google.com/app/apikey
 
 ## 2. Google Sheets ulash
 
@@ -62,10 +62,10 @@ Vercel Python entrypoint qidiradi, shuning uchun loyiha ichida `app.py` bor. Ver
 
 ```env
 TELEGRAM_BOT_TOKEN=...
-AI_PROVIDER=groq
-GROQ_API_KEY=...
-AI_BASE_URL=https://api.groq.com/openai/v1
-OPENAI_TEXT_MODEL=llama-3.3-70b-versatile
+AI_PROVIDER=gemini
+GEMINI_API_KEY=...
+AI_TEXT_MODEL=gemini-2.0-flash
+AI_BASE_URL=
 GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
 GOOGLE_DRIVE_PARENT_FOLDER_ID=...
 SHARE_SPREADSHEET_WITH_EMAIL=...
@@ -99,6 +99,12 @@ Vercel sozlamalari to'g'riligini tekshirish:
 https://YOUR-VERCEL-DOMAIN.vercel.app/status
 ```
 
+Gemini AI ishlashini tekshirish:
+
+```text
+https://YOUR-VERCEL-DOMAIN.vercel.app/ai-health
+```
+
 Telegram webhook ulanganini tekshirish:
 
 ```text
@@ -107,17 +113,22 @@ https://YOUR-VERCEL-DOMAIN.vercel.app/webhook-info
 
 Vercelda polling (`python bot.py`) ishlatilmaydi; u faqat lokal yoki doimiy server uchun.
 
+Muhim: Telegram webhook ishlashi uchun Vercel deployment public bo'lishi kerak. Agar `/status` yoki `/webhook-info` ochilganda `Authentication Required` chiqsa, Telegram ham webhookga kira olmaydi. Vercel Project Settings ichida Deployment Protection / Vercel Authentication ni o'chiring yoki production domainni public qiling, keyin webhookni qayta ulang.
+
 ## 6. Bot buyruqlari
 
 ```text
 /start
 /setting
+/status
 /payment
 /help
+/gemini savolingiz
 /ai savolingiz
 /expense 25000 taksi
 /month
 /month 2026-05
+/hisobot
 /report
 /report month
 ```

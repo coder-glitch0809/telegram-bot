@@ -13,6 +13,8 @@ from typing import Any
 
 import gspread
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
 from openpyxl import Workbook
@@ -27,18 +29,30 @@ load_dotenv()
 # ============================================================
 # API KALITLAR .env FAYLIDA YONMA-YON TURADI:
 # TELEGRAM_BOT_TOKEN=...
-# OPENAI_API_KEY=...
+# GEMINI_API_KEY=...
 # Bu yerga kalit yozmang, .env fayliga yozing.
 # ============================================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GROK_API_KEY = os.getenv("GROK_API_KEY", "").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-AI_API_KEY = GROK_API_KEY or GROQ_API_KEY or OPENAI_API_KEY
-AI_PROVIDER = os.getenv("AI_PROVIDER", "xai" if GROK_API_KEY else "groq" if GROQ_API_KEY else "openai").strip().lower()
+AI_PROVIDER_ENV = os.getenv("AI_PROVIDER", "").strip().lower()
+if AI_PROVIDER_ENV:
+    AI_PROVIDER = AI_PROVIDER_ENV
+elif GEMINI_API_KEY:
+    AI_PROVIDER = "gemini"
+elif GROK_API_KEY:
+    AI_PROVIDER = "xai"
+else:
+    AI_PROVIDER = "openai"
+AI_API_KEY = {
+    "gemini": GEMINI_API_KEY,
+    "xai": GROK_API_KEY or OPENAI_API_KEY,
+    "openai": OPENAI_API_KEY,
+}.get(AI_PROVIDER, GEMINI_API_KEY or OPENAI_API_KEY or GROK_API_KEY)
 DEFAULT_AI_BASE_URL = {
+    "gemini": "",
     "xai": "https://api.x.ai/v1",
-    "groq": "https://api.groq.com/openai/v1",
     "openai": "",
 }.get(AI_PROVIDER, "")
 AI_BASE_URL = os.getenv("AI_BASE_URL", DEFAULT_AI_BASE_URL).strip()
@@ -48,11 +62,11 @@ GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip
 GOOGLE_DRIVE_PARENT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_PARENT_FOLDER_ID", "").strip()
 SHARE_SPREADSHEET_WITH_EMAIL = os.getenv("SHARE_SPREADSHEET_WITH_EMAIL", "").strip()
 DEFAULT_TEXT_MODEL = {
+    "gemini": "gemini-2.0-flash",
     "xai": "grok-4.20-reasoning",
-    "groq": "llama-3.3-70b-versatile",
     "openai": "gpt-4o-mini",
-}.get(AI_PROVIDER, "gpt-4o-mini")
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", DEFAULT_TEXT_MODEL).strip()
+}.get(AI_PROVIDER, "gemini-2.0-flash")
+AI_TEXT_MODEL = os.getenv("AI_TEXT_MODEL", DEFAULT_TEXT_MODEL).strip()
 OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe").strip()
 PAYMENT_ENABLED = os.getenv("PAYMENT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "ha"}
 PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "manual").strip()
@@ -101,6 +115,7 @@ openai_client_kwargs = {"api_key": AI_API_KEY or "missing"}
 if AI_BASE_URL:
     openai_client_kwargs["base_url"] = AI_BASE_URL
 openai_client = OpenAI(**openai_client_kwargs)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY or "missing")
 analytics: "AnalyticsStore | None" = None
 sheets: "ExpenseSheets | None" = None
 
@@ -394,7 +409,7 @@ def require_config() -> None:
     if not TELEGRAM_BOT_TOKEN:
         missing.append("TELEGRAM_BOT_TOKEN")
     if not AI_API_KEY:
-        missing.append("GROK_API_KEY yoki GROQ_API_KEY yoki OPENAI_API_KEY")
+        missing.append("GEMINI_API_KEY")
     if missing:
         joined = ", ".join(missing)
         raise RuntimeError(f"Sozlanmagan yoki topilmadi: {joined}. .env.example faylini ko'ring.")
@@ -500,8 +515,11 @@ async def setup_bot_commands(application: Application) -> None:
             BotCommand("start", "Botni boshlash"),
             BotCommand("setting", "Profil va bot sozlamalari"),
             BotCommand("payment", "Obuna va to'lov holati"),
+            BotCommand("gemini", "Gemini AI ga savol berish"),
             BotCommand("ai", "AI ga savol berish"),
+            BotCommand("status", "Bot holatini tekshirish"),
             BotCommand("help", "Komandalar ro'yxati"),
+            BotCommand("hisobot", "Admin hisoboti"),
             BotCommand("report", "Admin statistikasi"),
         ]
     )
@@ -556,6 +574,70 @@ def clean_json_response(content: str) -> str:
     return cleaned
 
 
+def friendly_error(exc: Exception) -> str:
+    message = str(exc)
+    if "RESOURCE_EXHAUSTED" in message or "429" in message or "quota" in message.lower():
+        return (
+            "Gemini API quota limiti tugagan yoki billing yoqilmagan. "
+            "Google AI Studio/API quota sozlamalarini tekshiring va birozdan keyin yana urinib ko'ring."
+        )
+    if "API_KEY_INVALID" in message or "invalid api key" in message.lower():
+        return "Gemini API key noto'g'ri. .env ichidagi GEMINI_API_KEY ni tekshiring."
+    if "permission" in message.lower() or "403" in message:
+        return "Gemini API uchun ruxsat yetarli emas. API key, loyiha va billing sozlamalarini tekshiring."
+    if "ConnectError" in message or "connection" in message.lower():
+        return "Internet yoki API ulanishida muammo bor. Birozdan keyin qayta urinib ko'ring."
+    return message[:700]
+
+
+def ask_ai_sync(text: str, system_instruction: str, temperature: float = 0.4) -> str:
+    if AI_PROVIDER == "gemini":
+        response = gemini_client.models.generate_content(
+            model=AI_TEXT_MODEL,
+            contents=text,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=temperature,
+            ),
+        )
+        return (response.text or "").strip()
+
+    response = openai_client.chat.completions.create(
+        model=AI_TEXT_MODEL,
+        messages=[
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": text},
+        ],
+        temperature=temperature,
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
+def generate_expense_json(prompt: str) -> str:
+    system_instruction = "Faqat valid JSON qaytaring. Markdown ishlatmang."
+    if AI_PROVIDER == "gemini":
+        response = gemini_client.models.generate_content(
+            model=AI_TEXT_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.1,
+                response_mime_type="application/json",
+            ),
+        )
+        return clean_json_response(response.text or "")
+
+    response = openai_client.chat.completions.create(
+        model=AI_TEXT_MODEL,
+        messages=[
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.1,
+    )
+    return clean_json_response(response.choices[0].message.content or "")
+
+
 def parse_expense(text: str) -> Expense:
     prompt = f"""
 Matndan xarajat ma'lumotini ajrat.
@@ -571,15 +653,7 @@ Agar valyuta aytilmagan bo'lsa UZS deb ol.
 Matn: {text}
 """.strip()
 
-    response = openai_client.chat.completions.create(
-        model=OPENAI_TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": "Faqat valid JSON qaytaring. Markdown ishlatmang."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.1,
-    )
-    content = clean_json_response(response.choices[0].message.content or "")
+    content = generate_expense_json(prompt)
     try:
         data = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -630,23 +704,12 @@ def record_usage(
 
 
 async def ask_ai(text: str) -> str:
-    response = await asyncio.to_thread(
-        openai_client.chat.completions.create,
-        model=OPENAI_TEXT_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Siz Telegram bot ichidagi foydali AI yordamchisiz. "
-                    "Javoblarni foydalanuvchi yozgan tilda, aniq, foydali va qisqa bering. "
-                    "Savolga bevosita javob bering, keraksiz kirish gaplarni yozmang."
-                ),
-            },
-            {"role": "user", "content": text},
-        ],
-        temperature=0.4,
+    system_instruction = (
+        "Siz Telegram bot ichidagi foydali AI yordamchisiz. "
+        "Javoblarni foydalanuvchi yozgan tilda, aniq, foydali va qisqa bering. "
+        "Savolga bevosita javob bering, keraksiz kirish gaplarni yozmang."
     )
-    return (response.choices[0].message.content or "").strip()
+    return await asyncio.to_thread(ask_ai_sync, text, system_instruction, 0.4)
 
 
 async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -656,6 +719,18 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     with tempfile.TemporaryDirectory() as tmp_dir:
         audio_path = Path(tmp_dir) / "voice.ogg"
         await telegram_file.download_to_drive(custom_path=str(audio_path))
+        if AI_PROVIDER == "gemini":
+            uploaded_file = await asyncio.to_thread(gemini_client.files.upload, file=audio_path)
+            response = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model=AI_TEXT_MODEL,
+                contents=[
+                    "Ushbu Telegram ovozli xabarini matnga aylantir. Faqat eshitilgan matnni qaytar.",
+                    uploaded_file,
+                ],
+            )
+            return (response.text or "").strip()
+
         with audio_path.open("rb") as audio_file:
             transcription = await asyncio.to_thread(
                 openai_client.audio.transcriptions.create,
@@ -679,6 +754,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{expense_status}\n\n"
         "Savolingizni oddiy matn qilib yuboring, men aniq javob beraman.\n\n"
         "/setting - bot sozlamalari\n"
+        "/status - bot holati\n"
+        "/gemini savol - Gemini AI\n"
+        "/hisobot - admin hisoboti\n"
         "/payment - obuna va to'lov holati\n"
         "/help - komandalar"
     )
@@ -688,12 +766,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     record_usage(update, "help")
     await update.message.reply_text(
         "Komandalar:\n"
-        "/start - botni boshlash\n"
+        "/start - botni ishga tushirish\n"
         "/setting - sozlamalar va profilingiz\n"
+        "/status - bot va AI holati\n"
         "/payment - obuna/to'lov holati\n"
+        "/gemini savol - Gemini AI ga alohida savol berish\n"
         "/ai savol - AI ga aniq savol berish\n"
         "/help - komandalar ro'yxati\n\n"
         "Admin komandalar:\n"
+        "/hisobot - 7 kunlik statistika\n"
         "/report - 7 kunlik statistika\n"
         "/report month - 31 kunlik statistika\n"
         "/expense 25000 ovqat - xarajat qo'shish\n"
@@ -712,9 +793,24 @@ async def setting_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"Username: {username}\n"
         f"Rol: {role}\n"
         f"AI provider: {AI_PROVIDER}\n"
-        f"AI model: {OPENAI_TEXT_MODEL}\n"
+        f"AI model: {AI_TEXT_MODEL}\n"
         f"To'lov: {'yoqilgan' if PAYMENT_ENABLED else 'hozircha ochirilgan'}\n"
         f"Xarajat yozish: {'ruxsat bor' if can_write_expenses(user.id) else 'ruxsat yoq'}"
+    )
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    record_usage(update, "status")
+    await update.message.reply_text(
+        "Bot holati:\n"
+        f"Telegram token: {'bor' if TELEGRAM_BOT_TOKEN else 'yoq'}\n"
+        f"AI provider: {AI_PROVIDER}\n"
+        f"AI model: {AI_TEXT_MODEL}\n"
+        f"Gemini API key: {'bor' if GEMINI_API_KEY else 'yoq'}\n"
+        f"Google Sheets: {'sozlangan' if GOOGLE_SERVICE_ACCOUNT_JSON or Path(GOOGLE_SERVICE_ACCOUNT_FILE).exists() else 'sozlanmagan'}\n"
+        f"Hisobot bazasi: {ANALYTICS_DB_FILE}\n"
+        f"Sizning rol: {'admin' if is_owner(user.id) else 'foydalanuvchi'}"
     )
 
 
@@ -726,7 +822,8 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = " ".join(context.args).strip()
     if not text:
-        await update.message.reply_text("Savolni ham yozing: /ai biznes reja tuzib ber")
+        command = update.message.text.split(maxsplit=1)[0]
+        await update.message.reply_text(f"Savolni ham yozing: {command} biznes reja tuzib ber")
         record_usage(update, "ai", status="empty")
         return
     await update.message.chat.send_action(ChatAction.TYPING)
@@ -735,7 +832,7 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as exc:
         logger.exception("AI request failed")
         record_usage(update, "ai", status="error", text_preview=text, error=str(exc))
-        await update.message.reply_text(f"AI javob bera olmadi: {exc}")
+        await update.message.reply_text(f"AI javob bera olmadi: {friendly_error(exc)}")
         return
     record_usage(update, "ai", text_preview=text, response_chars=len(answer))
     await update.message.reply_text(answer[:4096])
@@ -765,7 +862,7 @@ async def save_expense_from_text(update: Update, text: str) -> None:
     except Exception as exc:
         logger.exception("Expense save failed")
         record_usage(update, "expense", status="error", text_preview=text, error=str(exc))
-        await update.message.reply_text(f"Xarajatni yozib bo'lmadi: {exc}")
+        await update.message.reply_text(f"Xarajatni yozib bo'lmadi: {friendly_error(exc)}")
         return
 
     record_usage(update, "expense", text_preview=text)
@@ -858,7 +955,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as exc:
         logger.exception("Voice transcription failed")
         record_usage(update, "voice", status="error", error=str(exc))
-        await update.message.reply_text(f"Ovozni matnga aylantirib bo'lmadi: {exc}")
+        await update.message.reply_text(f"Ovozni matnga aylantirib bo'lmadi: {friendly_error(exc)}")
         return
 
     record_usage(update, "voice", text_preview=text)
@@ -872,7 +969,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as exc:
         logger.exception("AI voice answer failed")
         record_usage(update, "ai", status="error", text_preview=text, error=str(exc))
-        await update.message.reply_text(f"AI javob bera olmadi: {exc}")
+        await update.message.reply_text(f"AI javob bera olmadi: {friendly_error(exc)}")
         return
     record_usage(update, "ai", text_preview=text, response_chars=len(answer))
     await update.message.reply_text(answer[:4096])
@@ -886,7 +983,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as exc:
         logger.exception("AI text answer failed")
         record_usage(update, "text", status="error", text_preview=text, error=str(exc))
-        await update.message.reply_text(f"AI javob bera olmadi: {exc}")
+        await update.message.reply_text(f"AI javob bera olmadi: {friendly_error(exc)}")
         return
     record_usage(update, "text", text_preview=text, response_chars=len(answer))
     await update.message.reply_text(answer[:4096])
@@ -914,11 +1011,14 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("setting", setting_command))
+    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("payment", payment_command))
     application.add_handler(CommandHandler("ai", ai_command))
+    application.add_handler(CommandHandler("gemini", ai_command))
     application.add_handler(CommandHandler("expense", expense_command))
     application.add_handler(CommandHandler("month", month_command))
     application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("hisobot", report_command))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error_handler)
@@ -928,7 +1028,6 @@ def build_application() -> Application:
 if __name__ == "__main__":
     require_config()
     analytics = AnalyticsStore(ANALYTICS_DB_FILE)
-    sheets = ExpenseSheets()
     app = build_application()
     logger.info("Bot ishga tushdi.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
