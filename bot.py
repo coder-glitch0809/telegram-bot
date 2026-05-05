@@ -5,6 +5,7 @@ import os
 import smtplib
 import sqlite3
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.message import EmailMessage
@@ -12,9 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import gspread
+import httpx
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 from google.oauth2.service_account import Credentials
 from openai import OpenAI
 from openpyxl import Workbook
@@ -29,33 +29,56 @@ load_dotenv()
 # ============================================================
 # API KALITLAR .env FAYLIDA YONMA-YON TURADI:
 # TELEGRAM_BOT_TOKEN=...
-# GEMINI_API_KEY=...
+# OPENAI_API_KEY=...
 # Bu yerga kalit yozmang, .env fayliga yozing.
 # ============================================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GROK_API_KEY = os.getenv("GROK_API_KEY", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+# GEMINI_API_KEY yo'q bo'lsa, GROQ_API_KEY "AIzaSy" bilan boshlasa Gemini kaliti sifatida qabul qil
+_raw_groq = GROQ_API_KEY
+if not GEMINI_API_KEY and _raw_groq.startswith("AIzaSy"):
+    GEMINI_API_KEY = _raw_groq
+
 AI_PROVIDER_ENV = os.getenv("AI_PROVIDER", "").strip().lower()
 if AI_PROVIDER_ENV:
     AI_PROVIDER = AI_PROVIDER_ENV
 elif GEMINI_API_KEY:
     AI_PROVIDER = "gemini"
+elif _raw_groq and not _raw_groq.startswith("AIzaSy"):
+    AI_PROVIDER = "groq"
 elif GROK_API_KEY:
     AI_PROVIDER = "xai"
 else:
     AI_PROVIDER = "openai"
+
 AI_API_KEY = {
-    "gemini": GEMINI_API_KEY,
+    "gemini": GEMINI_API_KEY or OPENAI_API_KEY,
     "xai": GROK_API_KEY or OPENAI_API_KEY,
-    "openai": OPENAI_API_KEY,
-}.get(AI_PROVIDER, GEMINI_API_KEY or OPENAI_API_KEY or GROK_API_KEY)
+    "groq": _raw_groq or OPENAI_API_KEY,
+    "openai": OPENAI_API_KEY or _raw_groq,
+}.get(AI_PROVIDER, OPENAI_API_KEY or GEMINI_API_KEY)
+
 DEFAULT_AI_BASE_URL = {
-    "gemini": "",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
     "xai": "https://api.x.ai/v1",
+    "groq": "https://api.groq.com/openai/v1",
     "openai": "",
 }.get(AI_PROVIDER, "")
 AI_BASE_URL = os.getenv("AI_BASE_URL", DEFAULT_AI_BASE_URL).strip()
+# Gemini base URL ni to'g'ri shakliga keltir
+if AI_PROVIDER == "gemini":
+    _url = AI_BASE_URL.rstrip("/")
+    if _url in {
+        "https://generativelanguage.googleapis.com/v1beta",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+    }:
+        AI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+if AI_PROVIDER == "groq" and AI_BASE_URL.rstrip("/") in {"https://api.groq.com/v1", "https://api.groq.com/v1/models"}:
+    AI_BASE_URL = "https://api.groq.com/openai/v1"
 
 GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "google-service-account.json").strip()
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
@@ -64,9 +87,10 @@ SHARE_SPREADSHEET_WITH_EMAIL = os.getenv("SHARE_SPREADSHEET_WITH_EMAIL", "").str
 DEFAULT_TEXT_MODEL = {
     "gemini": "gemini-2.0-flash",
     "xai": "grok-4.20-reasoning",
+    "groq": "llama-3.3-70b-versatile",
     "openai": "gpt-4o-mini",
-}.get(AI_PROVIDER, "gemini-2.0-flash")
-AI_TEXT_MODEL = os.getenv("AI_TEXT_MODEL", DEFAULT_TEXT_MODEL).strip()
+}.get(AI_PROVIDER, "gpt-4o-mini")
+OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", DEFAULT_TEXT_MODEL).strip()
 OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe").strip()
 PAYMENT_ENABLED = os.getenv("PAYMENT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "ha"}
 PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "manual").strip()
@@ -104,6 +128,14 @@ EXPENSE_HEADERS = [
     "description",
     "raw_text",
 ]
+VOICE_REPORT_HEADERS = [
+    "date",
+    "time",
+    "telegram_user_id",
+    "telegram_username",
+    "full_name",
+    "transcript",
+]
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -115,7 +147,6 @@ openai_client_kwargs = {"api_key": AI_API_KEY or "missing"}
 if AI_BASE_URL:
     openai_client_kwargs["base_url"] = AI_BASE_URL
 openai_client = OpenAI(**openai_client_kwargs)
-gemini_client = genai.Client(api_key=GEMINI_API_KEY or "missing")
 analytics: "AnalyticsStore | None" = None
 sheets: "ExpenseSheets | None" = None
 
@@ -403,16 +434,52 @@ class ExpenseSheets:
         worksheet = self._month_sheet(spreadsheet, month_key)
         return worksheet.get_all_records()
 
+    def _voice_sheet(self, spreadsheet, sheet_title: str):
+        try:
+            worksheet = spreadsheet.worksheet(sheet_title)
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(
+                title=sheet_title,
+                rows=1000,
+                cols=len(VOICE_REPORT_HEADERS),
+            )
+            worksheet.append_row(VOICE_REPORT_HEADERS)
+        return worksheet
+
+    def append_voice_report(
+        self,
+        user_id: int,
+        username: str,
+        full_name: str,
+        transcript: str,
+    ) -> str:
+        now = datetime.now()
+        month_key = now.strftime("%Y-%m")
+        spreadsheet = self._open_or_create_spreadsheet(user_id, username)
+        worksheet = self._voice_sheet(spreadsheet, f"Voice-{month_key}")
+        worksheet.append_row(
+            [
+                now.strftime("%Y-%m-%d"),
+                now.strftime("%H:%M:%S"),
+                user_id,
+                username,
+                full_name,
+                transcript,
+            ],
+            value_input_option="USER_ENTERED",
+        )
+        return spreadsheet.url
+
 
 def require_config() -> None:
     missing = []
     if not TELEGRAM_BOT_TOKEN:
         missing.append("TELEGRAM_BOT_TOKEN")
     if not AI_API_KEY:
-        missing.append("GEMINI_API_KEY")
+        missing.append("GEMINI_API_KEY yoki GROQ_API_KEY yoki OPENAI_API_KEY")
     if missing:
         joined = ", ".join(missing)
-        raise RuntimeError(f"Sozlanmagan yoki topilmadi: {joined}. .env.example faylini ko'ring.")
+        raise RuntimeError(f"Sozlanmagan yoki topilmadi: {joined}. .env faylini ko'ring.")
 
 
 def require_google_config() -> None:
@@ -515,11 +582,8 @@ async def setup_bot_commands(application: Application) -> None:
             BotCommand("start", "Botni boshlash"),
             BotCommand("setting", "Profil va bot sozlamalari"),
             BotCommand("payment", "Obuna va to'lov holati"),
-            BotCommand("gemini", "Gemini AI ga savol berish"),
             BotCommand("ai", "AI ga savol berish"),
-            BotCommand("status", "Bot holatini tekshirish"),
             BotCommand("help", "Komandalar ro'yxati"),
-            BotCommand("hisobot", "Admin hisoboti"),
             BotCommand("report", "Admin statistikasi"),
         ]
     )
@@ -574,68 +638,55 @@ def clean_json_response(content: str) -> str:
     return cleaned
 
 
+def is_transient_ai_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in [
+            "503",
+            "unavailable",
+            "high demand",
+            "temporarily unavailable",
+            "rate limit",
+            "resource_exhausted",
+            "timeout",
+            "connection reset",
+            "connection aborted",
+        ]
+    )
+
+
+def ai_call_with_retries(callable_obj, retries: int = 3, initial_delay: float = 1.0):
+    delay = initial_delay
+    for attempt in range(1, retries + 1):
+        try:
+            return callable_obj()
+        except Exception as exc:
+            if attempt == retries or not is_transient_ai_error(exc):
+                raise
+            logger.warning(
+                "AI request transient error, retrying %d/%d after %.1fs: %s",
+                attempt,
+                retries,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, 5.0)
+
+
 def friendly_error(exc: Exception) -> str:
     message = str(exc)
-    if "RESOURCE_EXHAUSTED" in message or "429" in message or "quota" in message.lower():
-        return (
-            "Gemini API quota limiti tugagan yoki billing yoqilmagan. "
-            "Google AI Studio/API quota sozlamalarini tekshiring va birozdan keyin yana urinib ko'ring."
-        )
-    if "API_KEY_INVALID" in message or "invalid api key" in message.lower():
-        return "Gemini API key noto'g'ri. .env ichidagi GEMINI_API_KEY ni tekshiring."
     if "permission" in message.lower() or "403" in message:
-        return "Gemini API uchun ruxsat yetarli emas. API key, loyiha va billing sozlamalarini tekshiring."
-    if "ConnectError" in message or "connection" in message.lower():
+        return "AI xizmatiga kirish ruxsati yo'q. API key yoki billingni tekshiring."
+    if "503" in message or "unavailable" in message.lower() or "high demand" in message.lower():
+        return (
+            "AI modeli hozir yuqori talab ostida yoki vaqtincha mavjud emas. "
+            "Iltimos, birozdan keyin qayta urinib ko'ring."
+        )
+    if "connecterror" in message.lower() or "connection" in message.lower():
         return "Internet yoki API ulanishida muammo bor. Birozdan keyin qayta urinib ko'ring."
     return message[:700]
-
-
-def ask_ai_sync(text: str, system_instruction: str, temperature: float = 0.4) -> str:
-    if AI_PROVIDER == "gemini":
-        response = gemini_client.models.generate_content(
-            model=AI_TEXT_MODEL,
-            contents=text,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=temperature,
-            ),
-        )
-        return (response.text or "").strip()
-
-    response = openai_client.chat.completions.create(
-        model=AI_TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": text},
-        ],
-        temperature=temperature,
-    )
-    return (response.choices[0].message.content or "").strip()
-
-
-def generate_expense_json(prompt: str) -> str:
-    system_instruction = "Faqat valid JSON qaytaring. Markdown ishlatmang."
-    if AI_PROVIDER == "gemini":
-        response = gemini_client.models.generate_content(
-            model=AI_TEXT_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.1,
-                response_mime_type="application/json",
-            ),
-        )
-        return clean_json_response(response.text or "")
-
-    response = openai_client.chat.completions.create(
-        model=AI_TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.1,
-    )
-    return clean_json_response(response.choices[0].message.content or "")
 
 
 def parse_expense(text: str) -> Expense:
@@ -653,7 +704,17 @@ Agar valyuta aytilmagan bo'lsa UZS deb ol.
 Matn: {text}
 """.strip()
 
-    content = generate_expense_json(prompt)
+    response = ai_call_with_retries(
+        lambda: openai_client.chat.completions.create(
+            model=OPENAI_TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": "Faqat valid JSON qaytaring. Markdown ishlatmang."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+        )
+    )
+    content = clean_json_response(response.choices[0].message.content or "")
     try:
         data = json.loads(content)
     except json.JSONDecodeError as exc:
@@ -704,12 +765,26 @@ def record_usage(
 
 
 async def ask_ai(text: str) -> str:
-    system_instruction = (
-        "Siz Telegram bot ichidagi foydali AI yordamchisiz. "
-        "Javoblarni foydalanuvchi yozgan tilda, aniq, foydali va qisqa bering. "
-        "Savolga bevosita javob bering, keraksiz kirish gaplarni yozmang."
+    response = await asyncio.to_thread(
+        lambda: ai_call_with_retries(
+            lambda: openai_client.chat.completions.create(
+                model=OPENAI_TEXT_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Siz Telegram bot ichidagi foydali AI yordamchisiz. "
+                            "Javoblarni foydalanuvchi yozgan tilda, aniq, foydali va qisqa bering. "
+                            "Savolga bevosita javob bering, keraksiz kirish gaplarni yozmang."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.4,
+            )
+        )
     )
-    return await asyncio.to_thread(ask_ai_sync, text, system_instruction, 0.4)
+    return (response.choices[0].message.content or "").strip()
 
 
 async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -719,25 +794,44 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     with tempfile.TemporaryDirectory() as tmp_dir:
         audio_path = Path(tmp_dir) / "voice.ogg"
         await telegram_file.download_to_drive(custom_path=str(audio_path))
-        if AI_PROVIDER == "gemini":
-            uploaded_file = await asyncio.to_thread(gemini_client.files.upload, file=audio_path)
-            response = await asyncio.to_thread(
-                gemini_client.models.generate_content,
-                model=AI_TEXT_MODEL,
-                contents=[
-                    "Ushbu Telegram ovozli xabarini matnga aylantir. Faqat eshitilgan matnni qaytar.",
-                    uploaded_file,
-                ],
-            )
-            return (response.text or "").strip()
 
-        with audio_path.open("rb") as audio_file:
-            transcription = await asyncio.to_thread(
-                openai_client.audio.transcriptions.create,
-                model=OPENAI_TRANSCRIBE_MODEL,
-                file=audio_file,
-            )
-    return transcription.text.strip()
+        if AI_PROVIDER == "gemini":
+            # Gemini native REST API orqali transkripsiya
+            audio_bytes = audio_path.read_bytes()
+            audio_b64 = __import__("base64").b64encode(audio_bytes).decode()
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "inline_data": {
+                                    "mime_type": "audio/ogg",
+                                    "data": audio_b64,
+                                }
+                            },
+                            {"text": "Ushbu ovozni matnga aylantir. Faqat matni yoz, hech narsa qo'shma."},
+                        ]
+                    }
+                ]
+            }
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{OPENAI_TEXT_MODEL}:generateContent?key={AI_API_KEY}"
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                result = resp.json()
+            text = result["candidates"][0]["content"]["parts"][0]["text"]
+            return text.strip()
+        else:
+            with audio_path.open("rb") as audio_file:
+                transcription = await asyncio.to_thread(
+                    lambda: ai_call_with_retries(
+                        lambda: openai_client.audio.transcriptions.create(
+                            model=OPENAI_TRANSCRIBE_MODEL,
+                            file=audio_file,
+                        )
+                    )
+                )
+            return transcription.text.strip()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -754,9 +848,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{expense_status}\n\n"
         "Savolingizni oddiy matn qilib yuboring, men aniq javob beraman.\n\n"
         "/setting - bot sozlamalari\n"
-        "/status - bot holati\n"
-        "/gemini savol - Gemini AI\n"
-        "/hisobot - admin hisoboti\n"
         "/payment - obuna va to'lov holati\n"
         "/help - komandalar"
     )
@@ -766,15 +857,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     record_usage(update, "help")
     await update.message.reply_text(
         "Komandalar:\n"
-        "/start - botni ishga tushirish\n"
+        "/start - botni boshlash\n"
         "/setting - sozlamalar va profilingiz\n"
-        "/status - bot va AI holati\n"
         "/payment - obuna/to'lov holati\n"
-        "/gemini savol - Gemini AI ga alohida savol berish\n"
         "/ai savol - AI ga aniq savol berish\n"
         "/help - komandalar ro'yxati\n\n"
         "Admin komandalar:\n"
-        "/hisobot - 7 kunlik statistika\n"
         "/report - 7 kunlik statistika\n"
         "/report month - 31 kunlik statistika\n"
         "/expense 25000 ovqat - xarajat qo'shish\n"
@@ -793,24 +881,9 @@ async def setting_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"Username: {username}\n"
         f"Rol: {role}\n"
         f"AI provider: {AI_PROVIDER}\n"
-        f"AI model: {AI_TEXT_MODEL}\n"
+        f"AI model: {OPENAI_TEXT_MODEL}\n"
         f"To'lov: {'yoqilgan' if PAYMENT_ENABLED else 'hozircha ochirilgan'}\n"
         f"Xarajat yozish: {'ruxsat bor' if can_write_expenses(user.id) else 'ruxsat yoq'}"
-    )
-
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    record_usage(update, "status")
-    await update.message.reply_text(
-        "Bot holati:\n"
-        f"Telegram token: {'bor' if TELEGRAM_BOT_TOKEN else 'yoq'}\n"
-        f"AI provider: {AI_PROVIDER}\n"
-        f"AI model: {AI_TEXT_MODEL}\n"
-        f"Gemini API key: {'bor' if GEMINI_API_KEY else 'yoq'}\n"
-        f"Google Sheets: {'sozlangan' if GOOGLE_SERVICE_ACCOUNT_JSON or Path(GOOGLE_SERVICE_ACCOUNT_FILE).exists() else 'sozlanmagan'}\n"
-        f"Hisobot bazasi: {ANALYTICS_DB_FILE}\n"
-        f"Sizning rol: {'admin' if is_owner(user.id) else 'foydalanuvchi'}"
     )
 
 
@@ -822,8 +895,7 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = " ".join(context.args).strip()
     if not text:
-        command = update.message.text.split(maxsplit=1)[0]
-        await update.message.reply_text(f"Savolni ham yozing: {command} biznes reja tuzib ber")
+        await update.message.reply_text("Savolni ham yozing: /ai biznes reja tuzib ber")
         record_usage(update, "ai", status="empty")
         return
     await update.message.chat.send_action(ChatAction.TYPING)
@@ -862,7 +934,7 @@ async def save_expense_from_text(update: Update, text: str) -> None:
     except Exception as exc:
         logger.exception("Expense save failed")
         record_usage(update, "expense", status="error", text_preview=text, error=str(exc))
-        await update.message.reply_text(f"Xarajatni yozib bo'lmadi: {friendly_error(exc)}")
+        await update.message.reply_text(f"Xarajatni yozib bo'lmadi: {exc}")
         return
 
     record_usage(update, "expense", text_preview=text)
@@ -947,6 +1019,23 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(report[:4096])
 
 
+async def save_voice_transcript_report(update: Update, transcript: str) -> None:
+    if not transcript.strip():
+        return
+    user_id, username, full_name = telegram_user_details(update)
+    try:
+        await asyncio.to_thread(
+            lambda: get_sheets().append_voice_report(
+                user_id=user_id,
+                username=username or full_name,
+                full_name=full_name,
+                transcript=transcript,
+            )
+        )
+    except Exception:
+        logger.exception("Voice report save failed")
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     await update.message.chat.send_action(ChatAction.TYPING)
@@ -959,6 +1048,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     record_usage(update, "voice", text_preview=text)
+    await save_voice_transcript_report(update, text)
     if can_write_expenses(user.id):
         await update.message.reply_text(f"Ovozdan o'qilgan matn: {text}")
         await save_expense_from_text(update, text)
@@ -1011,14 +1101,11 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("setting", setting_command))
-    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("payment", payment_command))
     application.add_handler(CommandHandler("ai", ai_command))
-    application.add_handler(CommandHandler("gemini", ai_command))
     application.add_handler(CommandHandler("expense", expense_command))
     application.add_handler(CommandHandler("month", month_command))
     application.add_handler(CommandHandler("report", report_command))
-    application.add_handler(CommandHandler("hisobot", report_command))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error_handler)

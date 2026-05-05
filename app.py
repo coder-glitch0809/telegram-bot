@@ -22,7 +22,7 @@ async def status() -> dict[str, object]:
         "status": "ok",
         "telegram_token": bool(telegram_bot.TELEGRAM_BOT_TOKEN),
         "ai_provider": telegram_bot.AI_PROVIDER,
-        "ai_model": telegram_bot.AI_TEXT_MODEL,
+        "ai_model": telegram_bot.OPENAI_TEXT_MODEL,
         "ai_key": bool(telegram_bot.AI_API_KEY),
         "google_sheets": bool(
             telegram_bot.GOOGLE_SERVICE_ACCOUNT_JSON
@@ -39,7 +39,7 @@ async def ai_health() -> dict[str, object]:
         return {
             "ok": True,
             "provider": telegram_bot.AI_PROVIDER,
-            "model": telegram_bot.AI_TEXT_MODEL,
+            "model": telegram_bot.OPENAI_TEXT_MODEL,
             "answer": answer[:100],
         }
     except Exception as exc:
@@ -47,8 +47,8 @@ async def ai_health() -> dict[str, object]:
         return {
             "ok": False,
             "provider": telegram_bot.AI_PROVIDER,
-            "model": telegram_bot.AI_TEXT_MODEL,
-            "error": telegram_bot.friendly_error(exc),
+            "model": telegram_bot.OPENAI_TEXT_MODEL,
+            "error": str(exc),
         }
 
 
