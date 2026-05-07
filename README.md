@@ -14,9 +14,14 @@ AI_PROVIDER=groq
 GROQ_API_KEY=PASTE_GROQ_API_KEY_HERE
 AI_BASE_URL=https://api.groq.com/openai/v1
 OPENAI_TEXT_MODEL=llama-3.3-70b-versatile
+OPENAI_TRANSCRIBE_MODEL=whisper-large-v3
+YOUTUBE_DOWNLOAD_ENABLED=false
+YOUTUBE_OWNER_ONLY=true
 ```
 
-Telegram bot tokenini `@BotFather` beradi. `gsk_` bilan boshlanadigan kalit odatda Groq API kaliti bo'ladi. Agar xAI Grok ishlatsangiz `AI_PROVIDER=xai`, `GROK_API_KEY=...`, `AI_BASE_URL=https://api.x.ai/v1` qiling.
+Telegram bot tokenini `@BotFather` beradi. `gsk_` bilan boshlanadigan kalit odatda Groq API kaliti bo'ladi, shuning uchun uni `GROQ_API_KEY` ga yozing. Agar haqiqiy xAI Grok ishlatsangiz `AI_PROVIDER=xai`, `GROK_API_KEY=...`, `AI_BASE_URL=https://api.x.ai/v1` qiling.
+
+Muhim: `.env` ichida JSON qiymatlarni ko'p qatorga bo'lib yozmang. `GOOGLE_SERVICE_ACCOUNT_JSON` bitta qatorda turishi kerak yoki umuman ishlatmay, JSON faylni `GOOGLE_SERVICE_ACCOUNT_FILE` orqali ulang. Aks holda `python-dotenv could not parse statement` xatosi chiqadi.
 
 ## 2. Google Sheets ulash
 
@@ -79,6 +84,10 @@ SMTP_FROM_EMAIL=...
 PAYMENT_ENABLED=false
 PAYMENT_PROVIDER=manual
 PAYMENT_OWNER_CONTACT=@username_yoki_telefon
+PREMIUM_USER_IDS=123456789,987654321
+YOUTUBE_DOWNLOAD_ENABLED=false
+YOUTUBE_OWNER_ONLY=true
+YOUTUBE_MAX_MB=45
 ```
 
 Deploydan keyin Telegram webhookni Vercel domeningizga ulang:
@@ -152,9 +161,25 @@ SMTP_FROM_EMAIL=sizning_emailingiz@gmail.com
 REPORT_WEEKLY_DAY=0
 ```
 
-Bot haftada bir marta qisqa faollik hisobotini, har oyning 1-kuni esa oldingi oy bo'yicha umumiy hisobotni emailga yuboradi. Gmail uchun `SMTP_PASSWORD` sifatida Google App Password ishlating.
+Bot lokal/doimiy serverda haftada bir marta qisqa faollik hisobotini, har oyning 1-kuni esa oldingi oy bo'yicha umumiy hisobotni emailga yuboradi. Vercelda `vercel.json` ichidagi cron `/cron/weekly` endpointini chaqiradi. Gmail uchun `SMTP_PASSWORD` sifatida Google App Password ishlating.
 
-## 8. Keyinchalik payment ulash
+## 8. Premium komandalar
+
+```text
+/start - kirish eshigi
+/portal - premium panel
+/radar - foydalanuvchilar soni, bugungi/haftalik faollik va top so'rovlar
+/necha_yulduz - /radar bilan bir xil, obunachi soni uchun
+/xazina - obuna va Pro rejalar
+/mantiq_chaqmoq - AI mini savol-javob
+/hafta_oynasi - admin uchun haftalik analiz va video ssenariy
+/yt_ol audio LINK - ruxsatli YouTube audioni yuborish
+/yt_ol video LINK - ruxsatli YouTube videoni yuborish
+```
+
+YouTube funksiyasi og'ir bo'lishi mumkin, shuning uchun default holatda o'chirilgan. Faqat o'zingizga tegishli, ruxsat berilgan yoki Creative Commons materiallar uchun yoqing.
+
+## 9. Keyinchalik payment ulash
 
 Obunachilar ko'payganda to'lov tizimi uchun quyidagi joy kengaytiriladi:
 
@@ -164,5 +189,5 @@ Obunachilar ko'payganda to'lov tizimi uchun quyidagi joy kengaytiriladi:
 - AI so'rovlar limitlari;
 - faqat to'laganlarga AI ishlatish.
 
-Hozir `PAYMENT_ENABLED=false`, shuning uchun oddiy foydalanuvchilar AI bilan ishlay oladi. Keyin to'lovni yoqish uchun Vercelda `PAYMENT_ENABLED=true` va provider sozlamalarini kiritasiz.
+Hozir `PAYMENT_ENABLED=false`, shuning uchun oddiy foydalanuvchilar AI bilan ishlay oladi. Keyin to'lovni yoqish uchun Vercelda `PAYMENT_ENABLED=true` qiling va pullik foydalanuvchilar ID sini `PREMIUM_USER_IDS` ga kiriting. Shu bitta toggle bilan AI, voice va YouTube funksiyalari Pro rejimga o'tadi.
 # telegram-bot

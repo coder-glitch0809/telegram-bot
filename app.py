@@ -23,12 +23,15 @@ async def status() -> dict[str, object]:
         "telegram_token": bool(telegram_bot.TELEGRAM_BOT_TOKEN),
         "ai_provider": telegram_bot.AI_PROVIDER,
         "ai_model": telegram_bot.OPENAI_TEXT_MODEL,
+        "transcribe_model": telegram_bot.OPENAI_TRANSCRIBE_MODEL,
         "ai_key": bool(telegram_bot.AI_API_KEY),
         "google_sheets": bool(
             telegram_bot.GOOGLE_SERVICE_ACCOUNT_JSON
             or telegram_bot.Path(telegram_bot.GOOGLE_SERVICE_ACCOUNT_FILE).exists()
         ),
         "payment_enabled": telegram_bot.PAYMENT_ENABLED,
+        "youtube_enabled": telegram_bot.YOUTUBE_DOWNLOAD_ENABLED,
+        "analytics_db": telegram_bot.ANALYTICS_DB_FILE,
     }
 
 
@@ -67,7 +70,6 @@ async def get_bot_application():
         bot_app = telegram_bot.build_application()
         await bot_app.initialize()
         await telegram_bot.setup_bot_commands(bot_app)
-        await bot_app.start()
         return bot_app
 
 
@@ -90,6 +92,13 @@ async def webhook_info() -> dict[str, object]:
         "last_error_date": info.last_error_date.isoformat() if info.last_error_date else None,
         "last_error_message": info.last_error_message,
     }
+
+
+@app.get("/cron/weekly")
+async def weekly_cron() -> dict[str, object]:
+    telegram_bot.get_analytics()
+    await telegram_bot.maybe_send_reports()
+    return {"ok": True, "message": "weekly reports checked"}
 
 
 @app.post("/telegram-webhook")

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import smtplib
 import sqlite3
 import tempfile
@@ -38,12 +39,22 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
+# Amaliyotda ko'pchilik "Grok" deb yozadi, lekin gsk_ kalit Groq formatida bo'ladi.
+if GROK_API_KEY.startswith("gsk_") and not GROQ_API_KEY:
+    GROQ_API_KEY = GROK_API_KEY
+    GROK_API_KEY = ""
+if GROQ_API_KEY.startswith("xai-") and not GROK_API_KEY:
+    GROK_API_KEY = GROQ_API_KEY
+    GROQ_API_KEY = ""
+
 # GEMINI_API_KEY yo'q bo'lsa, GROQ_API_KEY "AIzaSy" bilan boshlasa Gemini kaliti sifatida qabul qil
 _raw_groq = GROQ_API_KEY
 if not GEMINI_API_KEY and _raw_groq.startswith("AIzaSy"):
     GEMINI_API_KEY = _raw_groq
 
 AI_PROVIDER_ENV = os.getenv("AI_PROVIDER", "").strip().lower()
+if AI_PROVIDER_ENV == "grok":
+    AI_PROVIDER_ENV = "xai"
 if AI_PROVIDER_ENV:
     AI_PROVIDER = AI_PROVIDER_ENV
 elif GEMINI_API_KEY:
@@ -91,14 +102,33 @@ DEFAULT_TEXT_MODEL = {
     "openai": "gpt-4o-mini",
 }.get(AI_PROVIDER, "gpt-4o-mini")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", DEFAULT_TEXT_MODEL).strip()
-OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe").strip()
+DEFAULT_TRANSCRIBE_MODEL = {
+    "groq": "whisper-large-v3",
+    "openai": "gpt-4o-mini-transcribe",
+    "gemini": OPENAI_TEXT_MODEL,
+    "xai": "gpt-4o-mini-transcribe",
+}.get(AI_PROVIDER, "gpt-4o-mini-transcribe")
+OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", DEFAULT_TRANSCRIBE_MODEL).strip()
 PAYMENT_ENABLED = os.getenv("PAYMENT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "ha"}
 PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "manual").strip()
 PAYMENT_OWNER_CONTACT = os.getenv("PAYMENT_OWNER_CONTACT", "").strip()
+PREMIUM_USER_IDS = {
+    int(user_id)
+    for user_id in os.getenv("PREMIUM_USER_IDS", "").replace(" ", "").split(",")
+    if user_id
+}
 PAYMENT_PLANS = os.getenv(
     "PAYMENT_PLANS",
     "free:0:20 ta AI savol;pro:49000:Cheksizga yaqin AI savollar;business:149000:Jamoa uchun",
 ).strip()
+YOUTUBE_DOWNLOAD_ENABLED = os.getenv("YOUTUBE_DOWNLOAD_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "ha",
+}
+YOUTUBE_MAX_MB = int(os.getenv("YOUTUBE_MAX_MB", "45") or 45)
+YOUTUBE_OWNER_ONLY = os.getenv("YOUTUBE_OWNER_ONLY", "true").strip().lower() in {"1", "true", "yes", "ha"}
 ANALYTICS_DB_FILE = os.getenv(
     "ANALYTICS_DB_FILE",
     "/tmp/bot_analytics.sqlite3" if os.getenv("VERCEL") else "bot_analytics.sqlite3",
@@ -272,6 +302,65 @@ class AnalyticsStore:
                 "INSERT OR REPLACE INTO sent_reports (report_key, sent_at) VALUES (?, ?)",
                 (report_key, datetime.now().isoformat(timespec="seconds")),
             )
+
+    def subscriber_count(self) -> dict[str, int]:
+        now = datetime.now()
+        day_ago = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        week_ago = (now - timedelta(days=7)).isoformat(timespec="seconds")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN first_seen >= ? THEN 1 ELSE 0 END) AS new_today,
+                    SUM(CASE WHEN first_seen >= ? THEN 1 ELSE 0 END) AS new_week,
+                    SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END) AS active_today,
+                    SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END) AS active_week
+                FROM users
+                """,
+                (day_ago, week_ago, day_ago, week_ago),
+            ).fetchone()
+        return {
+            "total": int(row["total"] or 0),
+            "new_today": int(row["new_today"] or 0),
+            "new_week": int(row["new_week"] or 0),
+            "active_today": int(row["active_today"] or 0),
+            "active_week": int(row["active_week"] or 0),
+        }
+
+    def top_queries(self, days: int = 7, limit: int = 10) -> list[str]:
+        start_at = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT text_preview, COUNT(*) AS count
+                FROM interactions
+                WHERE created_at >= ?
+                  AND text_preview != ''
+                  AND action IN ('ai', 'text', 'voice', 'youtube')
+                GROUP BY LOWER(text_preview)
+                ORDER BY count DESC, MAX(created_at) DESC
+                LIMIT ?
+                """,
+                (start_at, limit),
+            ).fetchall()
+        return [f"{row['text_preview']} ({row['count']}x)" for row in rows]
+
+    def public_summary(self) -> str:
+        counts = self.subscriber_count()
+        top_queries = self.top_queries(days=7, limit=5)
+        lines = [
+            "Premium radar:",
+            f"Jami foydalanuvchi: {counts['total']}",
+            f"Bugun qo'shilgan: {counts['new_today']}",
+            f"7 kunda qo'shilgan: {counts['new_week']}",
+            f"Bugungi faol: {counts['active_today']}",
+            f"7 kunlik faol: {counts['active_week']}",
+            "",
+            "Oxirgi 7 kundagi ko'p so'ralgan yo'nalishlar:",
+        ]
+        lines.extend(f"- {item}" for item in top_queries) if top_queries else lines.append("- Hali yetarli so'rov yo'q")
+        return "\n".join(lines)
 
     def build_report(
         self,
@@ -579,11 +668,16 @@ async def stop_background_tasks(application: Application) -> None:
 async def setup_bot_commands(application: Application) -> None:
     await application.bot.set_my_commands(
         [
-            BotCommand("start", "Botni boshlash"),
-            BotCommand("setting", "Profil va bot sozlamalari"),
-            BotCommand("payment", "Obuna va to'lov holati"),
-            BotCommand("ai", "AI ga savol berish"),
-            BotCommand("help", "Komandalar ro'yxati"),
+            BotCommand("start", "Kirish eshigi"),
+            BotCommand("portal", "Premium panel"),
+            BotCommand("radar", "Bot auditoriyasi radari"),
+            BotCommand("necha_yulduz", "Foydalanuvchi soni"),
+            BotCommand("xazina", "Obuna va Pro rejalar"),
+            BotCommand("mantiq_chaqmoq", "Mini savol-javob"),
+            BotCommand("hafta_oynasi", "Haftalik analiz va video ssenariy"),
+            BotCommand("yt_ol", "Ruxsatli YouTube audio/video"),
+            BotCommand("ai", "AI ga savol"),
+            BotCommand("help", "Noodatiy komandalar xaritasi"),
             BotCommand("report", "Admin statistikasi"),
         ]
     )
@@ -595,6 +689,22 @@ def can_write_expenses(user_id: int) -> bool:
 
 def is_owner(user_id: int) -> bool:
     return can_write_expenses(user_id)
+
+
+def has_premium_access(user_id: int) -> bool:
+    if not PAYMENT_ENABLED:
+        return True
+    return is_owner(user_id) or user_id in PREMIUM_USER_IDS
+
+
+def premium_required_text() -> str:
+    lines = [
+        "Premium rejim yoqilgan.",
+        "AI, ovozli javob va yuklash funksiyalari faqat Pro foydalanuvchilar uchun ochiq.",
+        "",
+        payment_status_text(),
+    ]
+    return "\n".join(lines)
 
 
 def parse_payment_plans() -> list[tuple[str, str, str]]:
@@ -609,8 +719,8 @@ def parse_payment_plans() -> list[tuple[str, str, str]]:
 def payment_status_text() -> str:
     plans = parse_payment_plans()
     lines = [
-        "To'lov tizimi holati:",
-        "Yoqilgan" if PAYMENT_ENABLED else "Hozircha to'lovsiz rejim yoqilgan.",
+        "Premium markaz:",
+        "Status: yoqilgan" if PAYMENT_ENABLED else "Status: hozircha hammaga ochiq.",
         "",
         "Rejalar:",
     ]
@@ -626,7 +736,7 @@ def payment_status_text() -> str:
         lines.append(f"Aloqa: {PAYMENT_OWNER_CONTACT}")
     if not PAYMENT_ENABLED:
         lines.append("")
-        lines.append("Obunachilar ko'payganda admin to'lovni yoqadi.")
+        lines.append("Obunachilar ko'payganda admin PAYMENT_ENABLED=true qilib Pro rejimni yoqadi.")
     return "\n".join(lines)
 
 
@@ -843,25 +953,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else "Siz AI yordamchidan foydalanishingiz mumkin."
     )
     await update.message.reply_text(
-        "Salom! Men AI yordamchi botman.\n\n"
+        "Salom! Men premium AI yordamchi botman.\n\n"
         f"Sizning Telegram user ID: {user.id}\n\n"
         f"{expense_status}\n\n"
-        "Savolingizni oddiy matn qilib yuboring, men aniq javob beraman.\n\n"
-        "/setting - bot sozlamalari\n"
-        "/payment - obuna va to'lov holati\n"
-        "/help - komandalar"
+        "Matn yoki ovozli xabar yuboring, men javob beraman.\n\n"
+        "/portal - premium panel\n"
+        "/radar - foydalanuvchi va trendlar\n"
+        "/mantiq_chaqmoq - mini quiz\n"
+        "/yt_ol audio LINK - ruxsatli YouTube audio\n"
+        "/help - komandalar xaritasi"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_usage(update, "help")
     await update.message.reply_text(
-        "Komandalar:\n"
-        "/start - botni boshlash\n"
-        "/setting - sozlamalar va profilingiz\n"
-        "/payment - obuna/to'lov holati\n"
-        "/ai savol - AI ga aniq savol berish\n"
-        "/help - komandalar ro'yxati\n\n"
+        "Noodatiy komandalar xaritasi:\n"
+        "/portal - premium panel va profilingiz\n"
+        "/radar - obunachi soni, faollik va trendlar\n"
+        "/necha_yulduz - bot qancha foydalanuvchi yig'ganini ko'rish\n"
+        "/xazina - Pro rejalar va to'lov statusi\n"
+        "/mantiq_chaqmoq - mini savol-javob\n"
+        "/hafta_oynasi - haftalik analiz va video ssenariy\n"
+        "/yt_ol audio LINK - ruxsatli YouTube audioni olish\n"
+        "/yt_ol video LINK - ruxsatli YouTube videoni olish\n"
+        "/ai savol - AI ga aniq savol berish\n\n"
         "Admin komandalar:\n"
         "/report - 7 kunlik statistika\n"
         "/report month - 31 kunlik statistika\n"
@@ -892,7 +1008,183 @@ async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(payment_status_text())
 
 
+async def radar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    record_usage(update, "radar")
+    await update.message.reply_text(get_analytics().public_summary()[:4096])
+
+
+async def premium_portal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    record_usage(update, "portal")
+    status = "Pro ochiq" if has_premium_access(user.id) else "Pro kerak"
+    await update.message.reply_text(
+        "Premium panel:\n"
+        f"Profil: {user.full_name}\n"
+        f"AI provider: {AI_PROVIDER}\n"
+        f"Model: {OPENAI_TEXT_MODEL}\n"
+        f"Ovoz modeli: {OPENAI_TRANSCRIBE_MODEL}\n"
+        f"Status: {status}\n"
+        f"To'lov rejimi: {'yoqilgan' if PAYMENT_ENABLED else 'hammaga ochiq'}\n\n"
+        "Tez komandalar:\n"
+        "/radar - auditoriya va trendlar\n"
+        "/mantiq_chaqmoq - mini quiz\n"
+        "/yt_ol audio LINK - ruxsatli audio\n"
+        "/yt_ol video LINK - ruxsatli video"
+    )
+
+
+async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not has_premium_access(update.effective_user.id):
+        await update.message.reply_text(premium_required_text())
+        record_usage(update, "quiz", status="payment_required")
+        return
+    await update.message.chat.send_action(ChatAction.TYPING)
+    prompt = (
+        "O'zbek tilida bitta noodatiy, qiziqarli mini savol-javob tuz. "
+        "Format: Savol, A/B/C variantlar, oxirida 'Javobni bilish uchun: /ai javob ...' deb yoz."
+    )
+    try:
+        answer = await ask_ai(prompt)
+    except Exception as exc:
+        logger.exception("Quiz generation failed")
+        record_usage(update, "quiz", status="error", error=str(exc))
+        await update.message.reply_text(f"Quiz tayyorlanmadi: {friendly_error(exc)}")
+        return
+    record_usage(update, "quiz", response_chars=len(answer))
+    await update.message.reply_text(answer[:4096])
+
+
+async def weekly_video_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not is_owner(user.id):
+        await update.message.reply_text("Haftalik chuqur analiz faqat admin uchun.")
+        record_usage(update, "weekly_video", status="denied")
+        return
+
+    report = get_analytics().build_report(
+        "Oxirgi 7 kunlik bot analizi",
+        start_at=datetime.now() - timedelta(days=7),
+    )
+    prompt = (
+        "Quyidagi Telegram bot statistikasi asosida Uzbek tilida 45-60 soniyalik video ssenariy tuz. "
+        "Natija: 1) qisqa hook, 2) kadrlar ketma-ketligi, 3) ekranga chiqadigan matnlar, "
+        "4) ovoz matni, 5) keyingi hafta uchun 3 taklif. Raqamlarni aniq ishlat.\n\n"
+        f"{report}"
+    )
+    await update.message.chat.send_action(ChatAction.TYPING)
+    try:
+        answer = await ask_ai(prompt)
+    except Exception as exc:
+        logger.exception("Weekly video script failed")
+        record_usage(update, "weekly_video", status="error", error=str(exc))
+        await update.message.reply_text(f"Video ssenariy tayyorlanmadi: {friendly_error(exc)}")
+        return
+
+    record_usage(update, "weekly_video", response_chars=len(answer))
+    await update.message.reply_text(answer[:4096])
+
+
+YOUTUBE_URL_RE = re.compile(r"^https?://(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)/\S+$", re.IGNORECASE)
+
+
+def download_youtube_media(url: str, media_type: str) -> tuple[Path, str]:
+    try:
+        import yt_dlp
+    except ImportError as exc:
+        raise RuntimeError("yt-dlp o'rnatilmagan. requirements.txt yangilang va deployni qayta qiling.") from exc
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="yt-"))
+    output_template = str(tmp_dir / "%(title).80s-%(id)s.%(ext)s")
+    if media_type == "audio":
+        options = {
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
+            "outtmpl": output_template,
+            "noplaylist": True,
+            "quiet": True,
+        }
+    else:
+        options = {
+            "format": "best[filesize<45M]/bestvideo[filesize<45M]+bestaudio/best",
+            "outtmpl": output_template,
+            "noplaylist": True,
+            "quiet": True,
+        }
+
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+        title = str(info.get("title") or "YouTube media")
+        downloaded = sorted(tmp_dir.glob("*"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if not downloaded:
+            raise RuntimeError("Yuklangan fayl topilmadi.")
+        file_path = downloaded[0]
+
+    max_bytes = YOUTUBE_MAX_MB * 1024 * 1024
+    if file_path.stat().st_size > max_bytes:
+        raise RuntimeError(f"Fayl {YOUTUBE_MAX_MB} MB limitdan katta. Qisqaroq video yuboring.")
+    return file_path, title
+
+
+async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not YOUTUBE_DOWNLOAD_ENABLED:
+        await update.message.reply_text(
+            "YouTube yuklash hozir o'chirilgan. Admin YOUTUBE_DOWNLOAD_ENABLED=true qilsa ochiladi."
+        )
+        record_usage(update, "youtube", status="disabled")
+        return
+    if YOUTUBE_OWNER_ONLY and not is_owner(user.id):
+        await update.message.reply_text("YouTube yuklash hozircha faqat admin uchun ochilgan.")
+        record_usage(update, "youtube", status="owner_only")
+        return
+    if not has_premium_access(user.id):
+        await update.message.reply_text(premium_required_text())
+        record_usage(update, "youtube", status="payment_required")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Format: /yt_ol audio https://youtu.be/... yoki /yt_ol video https://youtu.be/...\n"
+            "Faqat o'zingizga tegishli, ruxsat berilgan yoki Creative Commons materiallarni yuklang."
+        )
+        record_usage(update, "youtube", status="empty")
+        return
+
+    media_type = context.args[0].strip().lower()
+    url = context.args[1].strip()
+    if media_type not in {"audio", "video"}:
+        await update.message.reply_text("Birinchi so'z audio yoki video bo'lishi kerak.")
+        record_usage(update, "youtube", status="bad_type", text_preview=" ".join(context.args))
+        return
+    if not YOUTUBE_URL_RE.match(url):
+        await update.message.reply_text("YouTube link noto'g'ri ko'rinyapti.")
+        record_usage(update, "youtube", status="bad_url", text_preview=url)
+        return
+
+    await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+    try:
+        file_path, title = await asyncio.to_thread(download_youtube_media, url, media_type)
+        with file_path.open("rb") as media_file:
+            if media_type == "audio":
+                await update.message.reply_audio(audio=media_file, title=title[:64], filename=file_path.name)
+            else:
+                await update.message.reply_document(
+                    document=media_file,
+                    filename=file_path.name,
+                    caption=title[:900],
+                )
+    except Exception as exc:
+        logger.exception("YouTube download failed")
+        record_usage(update, "youtube", status="error", text_preview=url, error=str(exc))
+        await update.message.reply_text(f"YouTube fayl tayyorlanmadi: {friendly_error(exc)}")
+        return
+    record_usage(update, "youtube", text_preview=url)
+
+
 async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not has_premium_access(update.effective_user.id):
+        await update.message.reply_text(premium_required_text())
+        record_usage(update, "ai", status="payment_required")
+        return
     text = " ".join(context.args).strip()
     if not text:
         await update.message.reply_text("Savolni ham yozing: /ai biznes reja tuzib ber")
@@ -1038,6 +1330,10 @@ async def save_voice_transcript_report(update: Update, transcript: str) -> None:
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    if not has_premium_access(user.id):
+        await update.message.reply_text(premium_required_text())
+        record_usage(update, "voice", status="payment_required")
+        return
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
         text = await transcribe_voice(update, context)
@@ -1066,6 +1362,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not has_premium_access(update.effective_user.id):
+        await update.message.reply_text(premium_required_text())
+        record_usage(update, "text", status="payment_required")
+        return
     text = update.message.text.strip()
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
@@ -1101,7 +1401,14 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("setting", setting_command))
+    application.add_handler(CommandHandler("portal", premium_portal_command))
+    application.add_handler(CommandHandler("radar", radar_command))
+    application.add_handler(CommandHandler("necha_yulduz", radar_command))
+    application.add_handler(CommandHandler("xazina", payment_command))
     application.add_handler(CommandHandler("payment", payment_command))
+    application.add_handler(CommandHandler("mantiq_chaqmoq", quiz_command))
+    application.add_handler(CommandHandler("hafta_oynasi", weekly_video_command))
+    application.add_handler(CommandHandler("yt_ol", youtube_command))
     application.add_handler(CommandHandler("ai", ai_command))
     application.add_handler(CommandHandler("expense", expense_command))
     application.add_handler(CommandHandler("month", month_command))
