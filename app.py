@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 from fastapi import FastAPI, HTTPException, Request
 from telegram import Update
@@ -9,11 +10,47 @@ import bot as telegram_bot
 app = FastAPI()
 bot_app = None
 bot_lock = asyncio.Lock()
+webhook_lock = asyncio.Lock()
+webhook_ready = False
+
+
+def clean_base_url(value: str) -> str:
+    value = value.strip().rstrip("/")
+    if not value:
+        return ""
+    if not value.startswith(("http://", "https://")):
+        value = f"https://{value}"
+    return value
+
+
+def configured_base_url(request: Request | None = None) -> str:
+    for key in ("PUBLIC_BASE_URL", "VERCEL_PROJECT_PRODUCTION_URL", "VERCEL_URL"):
+        base_url = clean_base_url(os.getenv(key, ""))
+        if base_url:
+            return base_url
+    if request:
+        return clean_base_url(str(request.base_url))
+    return ""
+
+
+def webhook_url_for(request: Request | None = None, explicit_url: str | None = None) -> str:
+    if explicit_url:
+        return clean_base_url(explicit_url)
+    base_url = configured_base_url(request)
+    if not base_url:
+        raise RuntimeError("PUBLIC_BASE_URL yoki VERCEL_URL topilmadi.")
+    return f"{base_url}/telegram-webhook"
 
 
 @app.get("/")
-async def health_check() -> dict[str, str]:
-    return {"status": "ok", "service": "telegram-ai-bot"}
+async def health_check(request: Request) -> dict[str, object]:
+    return {
+        "status": "ok",
+        "service": "telegram-ai-bot",
+        "base_url": configured_base_url(request),
+        "webhook_url": webhook_url_for(request),
+        "next": ["/status", "/ai-health", "/setup-webhook", "/webhook-info"],
+    }
 
 
 @app.get("/status")
@@ -59,6 +96,33 @@ async def get_bot_application():
     if bot_app:
         return bot_app
 
+
+async def ensure_webhook(request: Request | None = None, explicit_url: str | None = None) -> dict[str, object]:
+    global webhook_ready
+
+    async with webhook_lock:
+        application = await get_bot_application()
+        url = webhook_url_for(request, explicit_url)
+        info = await application.bot.get_webhook_info()
+        if info.url == url:
+            webhook_ready = True
+            return {"ok": True, "webhook_url": url, "already_set": True}
+        ok = await application.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+        webhook_ready = bool(ok)
+        return {"ok": ok, "webhook_url": url, "already_set": False}
+
+
+@app.on_event("startup")
+async def auto_setup_webhook_on_startup() -> None:
+    if os.getenv("AUTO_SETUP_WEBHOOK", "true").strip().lower() not in {"1", "true", "yes", "ha"}:
+        return
+    if not telegram_bot.TELEGRAM_BOT_TOKEN:
+        return
+    try:
+        await ensure_webhook()
+    except Exception:
+        telegram_bot.logger.exception("Automatic webhook setup skipped")
+
     async with bot_lock:
         if bot_app:
             return bot_app
@@ -75,11 +139,12 @@ async def get_bot_application():
 
 @app.get("/setup-webhook")
 async def setup_webhook(request: Request, url: str | None = None) -> dict[str, object]:
-    application = await get_bot_application()
-    if not url:
-        url = str(request.url_for("telegram_webhook"))
-    ok = await application.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES)
-    return {"ok": ok, "webhook_url": url}
+    return await ensure_webhook(request, url)
+
+
+@app.get("/auto-webhook")
+async def auto_webhook(request: Request) -> dict[str, object]:
+    return await ensure_webhook(request)
 
 
 @app.get("/webhook-info")

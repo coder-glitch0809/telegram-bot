@@ -65,10 +65,25 @@ python bot.py
 
 ## Vercel Webhook
 
-Vercel Environment Variables ichiga `.env`dagi qiymatlarni kiriting. Deploydan keyin webhook:
+Vercel Environment Variables ichiga `.env.example`dagi nomlarni kiriting. Custom domeningiz bo'lsa:
+
+```env
+PUBLIC_BASE_URL=https://sizning-domeningiz.uz
+AUTO_SETUP_WEBHOOK=true
+```
+
+Custom domen bo'lmasa `PUBLIC_BASE_URL` bo'sh qolishi mumkin, Vercel `VERCEL_URL` orqali webhookni avtomatik yasaydi.
+
+Deploydan keyin webhook odatda avtomatik ulanadi. Qo'lda ulash kerak bo'lsa:
 
 ```text
 https://YOUR-VERCEL-DOMAIN.vercel.app/setup-webhook?url=https://YOUR-VERCEL-DOMAIN.vercel.app/telegram-webhook
+```
+
+Yoki domenni envdan o'zi olishi uchun:
+
+```text
+https://YOUR-VERCEL-DOMAIN.vercel.app/setup-webhook
 ```
 
 Tekshirish endpointlari:
