@@ -68,6 +68,8 @@ async def get_bot_application():
         bot_app = telegram_bot.build_application()
         await bot_app.initialize()
         await telegram_bot.setup_bot_commands(bot_app)
+        if not bot_app.running:
+            await bot_app.start()
         return bot_app
 
 
