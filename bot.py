@@ -130,10 +130,14 @@ MEDIA_DOWNLOAD_ENABLED = os.getenv("MEDIA_DOWNLOAD_ENABLED", os.getenv("YOUTUBE_
     "ha",
 }
 MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", os.getenv("YOUTUBE_MAX_MB", "45")) or 45)
-ANALYTICS_DB_FILE = os.getenv(
-    "ANALYTICS_DB_FILE",
-    "/tmp/bot_analytics.sqlite3" if os.getenv("VERCEL") or os.getenv("VERCEL_URL") else "bot_analytics.sqlite3",
-).strip()
+DEFAULT_ANALYTICS_DB_FILE = (
+    str(Path(tempfile.gettempdir()) / "bot_analytics.sqlite3")
+    if os.getenv("VERCEL") or os.getenv("VERCEL_URL")
+    else "bot_analytics.sqlite3"
+)
+ANALYTICS_DB_FILE = os.getenv("ANALYTICS_DB_FILE", DEFAULT_ANALYTICS_DB_FILE).strip()
+if os.getenv("VERCEL") or os.getenv("VERCEL_URL"):
+    ANALYTICS_DB_FILE = str(Path(tempfile.gettempdir()) / "bot_analytics.sqlite3")
 
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 MEDIA_URL_RE = re.compile(
@@ -181,6 +185,9 @@ class AnalyticsStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
+        db_path = Path(self.db_file)
+        if db_path.parent and str(db_path.parent) not in {"", "."}:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.db_file)
         connection.row_factory = sqlite3.Row
         return connection
