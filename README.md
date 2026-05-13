@@ -69,12 +69,12 @@ Vercel Environment Variables ichiga `.env.example`dagi nomlarni kiriting. Custom
 
 ```env
 PUBLIC_BASE_URL=https://sizning-domeningiz.uz
-AUTO_SETUP_WEBHOOK=true
+AUTO_SETUP_WEBHOOK=false
 ```
 
 Custom domen bo'lmasa `PUBLIC_BASE_URL` bo'sh qolishi mumkin, Vercel `VERCEL_URL` orqali webhookni avtomatik yasaydi.
 
-Deploydan keyin webhook odatda avtomatik ulanadi. Qo'lda ulash kerak bo'lsa:
+Deploydan keyin webhookni bir marta qo'lda ulang:
 
 ```text
 https://YOUR-VERCEL-DOMAIN.vercel.app/setup-webhook?url=https://YOUR-VERCEL-DOMAIN.vercel.app/telegram-webhook

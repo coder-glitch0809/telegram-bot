@@ -96,6 +96,19 @@ async def get_bot_application():
     if bot_app:
         return bot_app
 
+    async with bot_lock:
+        if bot_app:
+            return bot_app
+
+        telegram_bot.require_config()
+        telegram_bot.analytics = telegram_bot.AnalyticsStore(telegram_bot.ANALYTICS_DB_FILE)
+        bot_app = telegram_bot.build_application()
+        await bot_app.initialize()
+        await telegram_bot.setup_bot_commands(bot_app)
+        if not bot_app.running:
+            await bot_app.start()
+        return bot_app
+
 
 async def ensure_webhook(request: Request | None = None, explicit_url: str | None = None) -> dict[str, object]:
     global webhook_ready
@@ -110,31 +123,6 @@ async def ensure_webhook(request: Request | None = None, explicit_url: str | Non
         ok = await application.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
         webhook_ready = bool(ok)
         return {"ok": ok, "webhook_url": url, "already_set": False}
-
-
-@app.on_event("startup")
-async def auto_setup_webhook_on_startup() -> None:
-    if os.getenv("AUTO_SETUP_WEBHOOK", "true").strip().lower() not in {"1", "true", "yes", "ha"}:
-        return
-    if not telegram_bot.TELEGRAM_BOT_TOKEN:
-        return
-    try:
-        await ensure_webhook()
-    except Exception:
-        telegram_bot.logger.exception("Automatic webhook setup skipped")
-
-    async with bot_lock:
-        if bot_app:
-            return bot_app
-
-        telegram_bot.require_config()
-        telegram_bot.analytics = telegram_bot.AnalyticsStore(telegram_bot.ANALYTICS_DB_FILE)
-        bot_app = telegram_bot.build_application()
-        await bot_app.initialize()
-        await telegram_bot.setup_bot_commands(bot_app)
-        if not bot_app.running:
-            await bot_app.start()
-        return bot_app
 
 
 @app.get("/setup-webhook")
