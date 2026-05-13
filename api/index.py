@@ -70,7 +70,7 @@ async def health_check(request: Request) -> dict[str, object]:
         "bot_runtime": "bot.py",
         "base_url": configured_base_url(request),
         "webhook_url": webhook_url_for(request),
-        "next": ["/status", "/ai-health", "/webhook-check", "/setup-webhook", "/webhook-info"],
+        "next": ["/status", "/ai-health", "/webhook-check", "/setup-webhook", "/force-webhook", "/webhook-info"],
     }
 
 
@@ -142,6 +142,15 @@ async def setup_webhook(request: Request, url: str | None = None) -> dict[str, o
         }
 
 
+@app.get("/force-webhook")
+async def force_webhook(request: Request, url: str | None = None) -> dict[str, object]:
+    try:
+        bot = load_bot()
+        return await bot.force_webhook(request, url)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:700]}
+
+
 @app.get("/webhook-info")
 async def webhook_info() -> dict[str, object]:
     try:
@@ -193,6 +202,7 @@ async def weekly_cron() -> dict[str, object]:
 @app.post("/telegram-webhook")
 async def telegram_webhook(request: Request) -> dict[str, bool]:
     try:
+        print("telegram_webhook: POST received", flush=True)
         bot = load_bot()
         application = await bot.get_bot_application()
         payload = await request.json()

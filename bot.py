@@ -1062,6 +1062,31 @@ async def ensure_webhook(request: Request | None = None, explicit_url: str | Non
         return {"ok": ok, "webhook_url": url, "already_set": False}
 
 
+async def force_webhook(request: Request | None = None, explicit_url: str | None = None) -> dict[str, object]:
+    global webhook_ready
+
+    async with webhook_lock:
+        application = await get_bot_application()
+        url = webhook_url_for(request, explicit_url)
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        ok = await application.bot.set_webhook(
+            url=url,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            max_connections=40,
+        )
+        info = await application.bot.get_webhook_info()
+        webhook_ready = bool(ok)
+        return {
+            "ok": ok,
+            "webhook_url": url,
+            "current_url": info.url,
+            "pending_update_count": info.pending_update_count,
+            "last_error_date": info.last_error_date.isoformat() if info.last_error_date else None,
+            "last_error_message": info.last_error_message,
+        }
+
+
 @app.get("/")
 async def health_check(request: Request) -> dict[str, object]:
     return {
@@ -1121,6 +1146,15 @@ async def setup_webhook(request: Request, url: str | None = None) -> dict[str, o
             "error": str(exc)[:700],
             "hint": "Vercel Environment Variables ichida TELEGRAM_BOT_TOKEN va AI key nomlarini tekshiring.",
         }
+
+
+@app.get("/force-webhook")
+async def force_webhook_endpoint(request: Request, url: str | None = None) -> dict[str, object]:
+    try:
+        return await force_webhook(request, url)
+    except Exception as exc:
+        logger.exception("Force webhook setup failed")
+        return {"ok": False, "error": str(exc)[:700]}
 
 
 @app.get("/webhook-info")
