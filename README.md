@@ -1,58 +1,60 @@
-# AI Telegram Bot + Google Sheets Xarajatlar
+# AI Telegram Bot
 
-Bu loyiha Telegram bot orqali AI bilan ishlash, ovozli yoki matnli xarajatlarni Google Sheets ga yozish va oy oxirida Excel hisobot olish uchun tayyorlangan.
+Bu loyiha Telegram ichida to'liq AI yordamchi bot sifatida ishlaydi:
 
-## 1. Kalitlarni joylash
+- uzbekcha, ruscha va inglizcha savol-javob;
+- privat chatda matn va voice orqali AI javob;
+- guruhlarda faqat `/ai` komandasi orqali AI javob;
+- AI rasm generatsiyasi, har foydalanuvchiga 10 ta bepul;
+- Instagram va YouTube linklaridan audio yoki video tanlash;
+- 18+ materiallarni rad etish;
+- bot egasiga haftalik foydalanuvchi va top so'rovlar hisoboti.
 
-`.env.example` faylidan nusxa oling va nomini `.env` qiling.
+## Kalitlar
 
-Eng muhim joy shu:
+Hech qachon API token yoki Google/Telegram kalitlarini kodga yozmang. Hammasi `.env` yoki hosting Environment Variables ichida turadi.
+
+Minimal sozlama:
 
 ```env
-TELEGRAM_BOT_TOKEN=PASTE_TELEGRAM_BOT_TOKEN_HERE
+TELEGRAM_BOT_TOKEN=PASTE_TELEGRAM_TOKEN_HERE
+OWNER_TELEGRAM_ID=123456789
+
 AI_PROVIDER=groq
-GROQ_API_KEY=PASTE_GROQ_API_KEY_HERE
+GROQ_API_KEY=PASTE_GROQ_KEY_HERE
 AI_BASE_URL=https://api.groq.com/openai/v1
 OPENAI_TEXT_MODEL=llama-3.3-70b-versatile
 OPENAI_TRANSCRIBE_MODEL=whisper-large-v3
-YOUTUBE_DOWNLOAD_ENABLED=false
-YOUTUBE_OWNER_ONLY=true
+
+OPENAI_API_KEY=PASTE_OPENAI_KEY_HERE
+IMAGE_GENERATION_ENABLED=true
+IMAGE_MODEL=gpt-image-1
+IMAGE_SIZE=1024x1024
+IMAGE_FREE_LIMIT=10
+
+MEDIA_DOWNLOAD_ENABLED=true
+MEDIA_MAX_MB=45
+
+PAYMENT_ENABLED=true
+PAYMENT_PROVIDER=manual
+PAYMENT_OWNER_CONTACT=@username_yoki_telefon
+PAYMENT_PLANS=pro:49000:10 tadan keyingi rasm generatsiyasi;business:149000:Jamoa va kanal uchun
+PREMIUM_USER_IDS=
+
+OWNER_EMAIL=your_gmail@gmail.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your_gmail@gmail.com
+SMTP_PASSWORD=PASTE_GMAIL_APP_PASSWORD_HERE
+SMTP_FROM_EMAIL=your_gmail@gmail.com
+REPORT_WEEKLY_DAY=0
 ```
 
-Telegram bot tokenini `@BotFather` beradi. `gsk_` bilan boshlanadigan kalit odatda Groq API kaliti bo'ladi, shuning uchun uni `GROQ_API_KEY` ga yozing. Agar haqiqiy xAI Grok ishlatsangiz `AI_PROVIDER=xai`, `GROK_API_KEY=...`, `AI_BASE_URL=https://api.x.ai/v1` qiling.
+`OWNER_EMAIL` va `SMTP_USERNAME` joyiga Gmail manzilingiz yoziladi. Gmail uchun oddiy parol emas, Google App Password ishlating.
 
-Muhim: `.env` ichida JSON qiymatlarni ko'p qatorga bo'lib yozmang. `GOOGLE_SERVICE_ACCOUNT_JSON` bitta qatorda turishi kerak yoki umuman ishlatmay, JSON faylni `GOOGLE_SERVICE_ACCOUNT_FILE` orqali ulang. Aks holda `python-dotenv could not parse statement` xatosi chiqadi.
+Rasm generatsiyasi OpenAI Images API orqali ishlaydi, shuning uchun `OPENAI_API_KEY` alohida kerak. Matn AI uchun Groq/Gemini/xAI/OpenAI ishlatishingiz mumkin.
 
-## 2. Google Sheets ulash
-
-Google Cloud da Service Account yarating va JSON credential faylini shu papkaga `google-service-account.json` nomi bilan qo'ying.
-
-`.env` ichida:
-
-```env
-GOOGLE_SERVICE_ACCOUNT_FILE=google-service-account.json
-SHARE_SPREADSHEET_WITH_EMAIL=sizning_gmailingiz@gmail.com
-```
-
-Bot har bir foydalanuvchi uchun alohida spreadsheet ochadi:
-
-```text
-Telegram Expenses - USER_ID
-```
-
-Har oy alohida worksheet bo'ladi, masalan `2026-05`.
-
-## 3. O'zingizni xarajat yozuvchi qilish
-
-Botni ishga tushirgandan keyin Telegramda `/start` yozing. Bot sizga user ID chiqaradi. Shu ID ni `.env` ga yozing:
-
-```env
-EXPENSE_ALLOWED_USER_IDS=123456789
-```
-
-Bu qiymat bo'sh qolsa, hech kim xarajat yoza olmaydi. Xavfsiz variant: o'zingizning ID ingizni yozib qo'yish.
-
-## 4. Ishga tushirish
+## Ishga Tushirish
 
 ```powershell
 python -m venv .venv
@@ -61,133 +63,42 @@ pip install -r requirements.txt
 python bot.py
 ```
 
-## 5. Vercelga deploy qilish
+## Vercel Webhook
 
-Vercel Python entrypoint qidiradi, shuning uchun loyiha ichida `app.py` bor. Vercelda Environment Variables qilib quyidagilarni qo'shing:
-
-```env
-TELEGRAM_BOT_TOKEN=...
-AI_PROVIDER=groq
-GROQ_API_KEY=...
-AI_BASE_URL=https://api.groq.com/openai/v1
-OPENAI_TEXT_MODEL=llama-3.3-70b-versatile
-GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
-GOOGLE_DRIVE_PARENT_FOLDER_ID=...
-SHARE_SPREADSHEET_WITH_EMAIL=...
-EXPENSE_ALLOWED_USER_IDS=...
-OWNER_EMAIL=...
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=...
-SMTP_PASSWORD=...
-SMTP_FROM_EMAIL=...
-PAYMENT_ENABLED=false
-PAYMENT_PROVIDER=manual
-PAYMENT_OWNER_CONTACT=@username_yoki_telefon
-PREMIUM_USER_IDS=123456789,987654321
-YOUTUBE_DOWNLOAD_ENABLED=false
-YOUTUBE_OWNER_ONLY=true
-YOUTUBE_MAX_MB=45
-```
-
-Deploydan keyin Telegram webhookni Vercel domeningizga ulang:
-
-```text
-https://api.telegram.org/botBOT_TOKEN/setWebhook?url=https://YOUR-VERCEL-DOMAIN.vercel.app/telegram-webhook
-```
-
-Yoki brauzerdan shu endpointni oching:
+Vercel Environment Variables ichiga `.env`dagi qiymatlarni kiriting. Deploydan keyin webhook:
 
 ```text
 https://YOUR-VERCEL-DOMAIN.vercel.app/setup-webhook?url=https://YOUR-VERCEL-DOMAIN.vercel.app/telegram-webhook
 ```
 
-Vercel sozlamalari to'g'riligini tekshirish:
+Tekshirish endpointlari:
 
 ```text
-https://YOUR-VERCEL-DOMAIN.vercel.app/status
+/status
+/ai-health
+/webhook-info
+/cron/weekly
 ```
 
-Groq/OpenAI ishlashini tekshirish:
-
-```text
-https://YOUR-VERCEL-DOMAIN.vercel.app/ai-health
-```
-
-Telegram webhook ulanganini tekshirish:
-
-```text
-https://YOUR-VERCEL-DOMAIN.vercel.app/webhook-info
-```
-
-Vercelda polling (`python bot.py`) ishlatilmaydi; u faqat lokal yoki doimiy server uchun.
-
-Muhim: Telegram webhook ishlashi uchun Vercel deployment public bo'lishi kerak. Agar `/status` yoki `/webhook-info` ochilganda `Authentication Required` chiqsa, Telegram ham webhookga kira olmaydi. Vercel Project Settings ichida Deployment Protection / Vercel Authentication ni o'chiring yoki production domainni public qiling, keyin webhookni qayta ulang.
-
-## 6. Bot buyruqlari
+## Komandalar
 
 ```text
 /start
-/setting
-/payment
 /help
-/ai savolingiz
-/expense 25000 taksi
-/month
-/month 2026-05
+/ai savol
+/image rasm prompti
+/rasm rasm prompti
+/media audio LINK
+/media video LINK
+/yt_ol audio LINK
+/yt_ol video LINK
+/payment
+/radar
 /report
-/report month
 ```
 
-Ovozli xarajat yuborsangiz, bot avval ovozni matnga aylantiradi, keyin xarajatni Google Sheets ga yozadi.
+`/radar` va `/report` faqat `OWNER_TELEGRAM_ID` uchun ishlaydi.
 
-## 7. Foydalanuvchi statistikasi va email hisobot
+## Muhim
 
-Bot hammaga ochiq: kim `/start` bossa yoki oddiy savol yozsa AI bilan ishlata oladi. Har bir foydalanuvchi va so'rov qisqacha `bot_analytics.sqlite3` bazaga yoziladi:
-
-- Telegram user ID, username, birinchi va oxirgi faollik;
-- AI so'rovlari, voice, xarajat va report buyruqlari soni;
-- oxirgi so'rovlarning qisqa matn preview qismi.
-
-Email hisobot uchun `.env` ichida SMTP sozlamalarini to'ldiring:
-
-```env
-OWNER_EMAIL=sizning_emailingiz@gmail.com
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=sizning_emailingiz@gmail.com
-SMTP_PASSWORD=PASTE_EMAIL_APP_PASSWORD_HERE
-SMTP_FROM_EMAIL=sizning_emailingiz@gmail.com
-REPORT_WEEKLY_DAY=0
-```
-
-Bot lokal/doimiy serverda haftada bir marta qisqa faollik hisobotini, har oyning 1-kuni esa oldingi oy bo'yicha umumiy hisobotni emailga yuboradi. Vercelda `vercel.json` ichidagi cron `/cron/weekly` endpointini chaqiradi. Gmail uchun `SMTP_PASSWORD` sifatida Google App Password ishlating.
-
-## 8. Premium komandalar
-
-```text
-/start - kirish eshigi
-/portal - premium panel
-/radar - foydalanuvchilar soni, bugungi/haftalik faollik va top so'rovlar
-/necha_yulduz - /radar bilan bir xil, obunachi soni uchun
-/xazina - obuna va Pro rejalar
-/mantiq_chaqmoq - AI mini savol-javob
-/hafta_oynasi - admin uchun haftalik analiz va video ssenariy
-/yt_ol audio LINK - ruxsatli YouTube audioni yuborish
-/yt_ol video LINK - ruxsatli YouTube videoni yuborish
-```
-
-YouTube funksiyasi og'ir bo'lishi mumkin, shuning uchun default holatda o'chirilgan. Faqat o'zingizga tegishli, ruxsat berilgan yoki Creative Commons materiallar uchun yoqing.
-
-## 9. Keyinchalik payment ulash
-
-Obunachilar ko'payganda to'lov tizimi uchun quyidagi joy kengaytiriladi:
-
-- foydalanuvchi bazasi;
-- subscription status;
-- payment provider webhook;
-- AI so'rovlar limitlari;
-- faqat to'laganlarga AI ishlatish.
-
-Hozir `PAYMENT_ENABLED=false`, shuning uchun oddiy foydalanuvchilar AI bilan ishlay oladi. Keyin to'lovni yoqish uchun Vercelda `PAYMENT_ENABLED=true` qiling va pullik foydalanuvchilar ID sini `PREMIUM_USER_IDS` ga kiriting. Shu bitta toggle bilan AI, voice va YouTube funksiyalari Pro rejimga o'tadi.
-# telegram-bot
+Media yuklash funksiyasi faqat o'zingizga tegishli, ruxsat berilgan yoki qonunan yuklab olish mumkin bo'lgan kontent uchun ishlatilishi kerak. Bot 18+ va pornografik kontentni tarqatmaydi.

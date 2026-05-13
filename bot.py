@@ -1,5 +1,5 @@
 import asyncio
-import json
+import base64
 import logging
 import os
 import re
@@ -7,50 +7,42 @@ import smtplib
 import sqlite3
 import tempfile
 import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
-import gspread
 import httpx
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from openai import OpenAI
-from openpyxl import Workbook
-from telegram import Update
-from telegram.constants import ChatAction
-from telegram import BotCommand
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatAction, ChatType
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 
 load_dotenv()
 
-# ============================================================
-# API KALITLAR .env FAYLIDA YONMA-YON TURADI:
-# TELEGRAM_BOT_TOKEN=...
-# OPENAI_API_KEY=...
-# Bu yerga kalit yozmang, .env fayliga yozing.
-# ============================================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 GROK_API_KEY = os.getenv("GROK_API_KEY", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# Amaliyotda ko'pchilik "Grok" deb yozadi, lekin gsk_ kalit Groq formatida bo'ladi.
 if GROK_API_KEY.startswith("gsk_") and not GROQ_API_KEY:
     GROQ_API_KEY = GROK_API_KEY
     GROK_API_KEY = ""
 if GROQ_API_KEY.startswith("xai-") and not GROK_API_KEY:
     GROK_API_KEY = GROQ_API_KEY
     GROQ_API_KEY = ""
-
-# GEMINI_API_KEY yo'q bo'lsa, GROQ_API_KEY "AIzaSy" bilan boshlasa Gemini kaliti sifatida qabul qil
-_raw_groq = GROQ_API_KEY
-if not GEMINI_API_KEY and _raw_groq.startswith("AIzaSy"):
-    GEMINI_API_KEY = _raw_groq
+if not GEMINI_API_KEY and GROQ_API_KEY.startswith("AIzaSy"):
+    GEMINI_API_KEY = GROQ_API_KEY
 
 AI_PROVIDER_ENV = os.getenv("AI_PROVIDER", "").strip().lower()
 if AI_PROVIDER_ENV == "grok":
@@ -59,7 +51,7 @@ if AI_PROVIDER_ENV:
     AI_PROVIDER = AI_PROVIDER_ENV
 elif GEMINI_API_KEY:
     AI_PROVIDER = "gemini"
-elif _raw_groq and not _raw_groq.startswith("AIzaSy"):
+elif GROQ_API_KEY and not GROQ_API_KEY.startswith("AIzaSy"):
     AI_PROVIDER = "groq"
 elif GROK_API_KEY:
     AI_PROVIDER = "xai"
@@ -69,8 +61,8 @@ else:
 AI_API_KEY = {
     "gemini": GEMINI_API_KEY or OPENAI_API_KEY,
     "xai": GROK_API_KEY or OPENAI_API_KEY,
-    "groq": _raw_groq or OPENAI_API_KEY,
-    "openai": OPENAI_API_KEY or _raw_groq,
+    "groq": GROQ_API_KEY or OPENAI_API_KEY,
+    "openai": OPENAI_API_KEY or GROQ_API_KEY,
 }.get(AI_PROVIDER, OPENAI_API_KEY or GEMINI_API_KEY)
 
 DEFAULT_AI_BASE_URL = {
@@ -80,21 +72,14 @@ DEFAULT_AI_BASE_URL = {
     "openai": "",
 }.get(AI_PROVIDER, "")
 AI_BASE_URL = os.getenv("AI_BASE_URL", DEFAULT_AI_BASE_URL).strip()
-# Gemini base URL ni to'g'ri shakliga keltir
-if AI_PROVIDER == "gemini":
-    _url = AI_BASE_URL.rstrip("/")
-    if _url in {
-        "https://generativelanguage.googleapis.com/v1beta",
-        "https://generativelanguage.googleapis.com/v1beta/openai",
-    }:
-        AI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+if AI_PROVIDER == "gemini" and AI_BASE_URL.rstrip("/") in {
+    "https://generativelanguage.googleapis.com/v1beta",
+    "https://generativelanguage.googleapis.com/v1beta/openai",
+}:
+    AI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 if AI_PROVIDER == "groq" and AI_BASE_URL.rstrip("/") in {"https://api.groq.com/v1", "https://api.groq.com/v1/models"}:
     AI_BASE_URL = "https://api.groq.com/openai/v1"
 
-GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "google-service-account.json").strip()
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-GOOGLE_DRIVE_PARENT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_PARENT_FOLDER_ID", "").strip()
-SHARE_SPREADSHEET_WITH_EMAIL = os.getenv("SHARE_SPREADSHEET_WITH_EMAIL", "").strip()
 DEFAULT_TEXT_MODEL = {
     "gemini": "gemini-2.0-flash",
     "xai": "grok-4.20-reasoning",
@@ -109,30 +94,8 @@ DEFAULT_TRANSCRIBE_MODEL = {
     "xai": "gpt-4o-mini-transcribe",
 }.get(AI_PROVIDER, "gpt-4o-mini-transcribe")
 OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", DEFAULT_TRANSCRIBE_MODEL).strip()
-PAYMENT_ENABLED = os.getenv("PAYMENT_ENABLED", "false").strip().lower() in {"1", "true", "yes", "ha"}
-PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "manual").strip()
-PAYMENT_OWNER_CONTACT = os.getenv("PAYMENT_OWNER_CONTACT", "").strip()
-PREMIUM_USER_IDS = {
-    int(user_id)
-    for user_id in os.getenv("PREMIUM_USER_IDS", "").replace(" ", "").split(",")
-    if user_id
-}
-PAYMENT_PLANS = os.getenv(
-    "PAYMENT_PLANS",
-    "free:0:20 ta AI savol;pro:49000:Cheksizga yaqin AI savollar;business:149000:Jamoa uchun",
-).strip()
-YOUTUBE_DOWNLOAD_ENABLED = os.getenv("YOUTUBE_DOWNLOAD_ENABLED", "false").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "ha",
-}
-YOUTUBE_MAX_MB = int(os.getenv("YOUTUBE_MAX_MB", "45") or 45)
-YOUTUBE_OWNER_ONLY = os.getenv("YOUTUBE_OWNER_ONLY", "true").strip().lower() in {"1", "true", "yes", "ha"}
-ANALYTICS_DB_FILE = os.getenv(
-    "ANALYTICS_DB_FILE",
-    "/tmp/bot_analytics.sqlite3" if os.getenv("VERCEL") else "bot_analytics.sqlite3",
-).strip()
+
+OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", os.getenv("BOT_OWNER_ID", "0")) or 0)
 OWNER_EMAIL = os.getenv("OWNER_EMAIL", "").strip()
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or 587)
@@ -141,53 +104,69 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
 REPORT_WEEKLY_DAY = int(os.getenv("REPORT_WEEKLY_DAY", "0") or 0)
 
-EXPENSE_ALLOWED_USER_IDS = {
+PAYMENT_ENABLED = os.getenv("PAYMENT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "ha"}
+PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "manual").strip()
+PAYMENT_OWNER_CONTACT = os.getenv("PAYMENT_OWNER_CONTACT", "@admin").strip()
+PAYMENT_PLANS = os.getenv(
+    "PAYMENT_PLANS",
+    "pro:49000:10 tadan keyingi rasm generatsiyasi;business:149000:Jamoa va kanal uchun",
+).strip()
+PREMIUM_USER_IDS = {
     int(user_id)
-    for user_id in os.getenv("EXPENSE_ALLOWED_USER_IDS", "").replace(" ", "").split(",")
+    for user_id in os.getenv("PREMIUM_USER_IDS", "").replace(" ", "").split(",")
     if user_id
 }
 
-EXPENSE_HEADERS = [
-    "date",
-    "time",
-    "telegram_user_id",
-    "telegram_username",
-    "amount",
-    "currency",
-    "category",
-    "description",
-    "raw_text",
-]
-VOICE_REPORT_HEADERS = [
-    "date",
-    "time",
-    "telegram_user_id",
-    "telegram_username",
-    "full_name",
-    "transcript",
-]
+IMAGE_GENERATION_ENABLED = os.getenv("IMAGE_GENERATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "ha"}
+IMAGE_FREE_LIMIT = int(os.getenv("IMAGE_FREE_LIMIT", "10") or 10)
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1").strip()
+IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024").strip()
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+MEDIA_DOWNLOAD_ENABLED = os.getenv("MEDIA_DOWNLOAD_ENABLED", os.getenv("YOUTUBE_DOWNLOAD_ENABLED", "true")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "ha",
+}
+MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", os.getenv("YOUTUBE_MAX_MB", "45")) or 45)
+ANALYTICS_DB_FILE = os.getenv(
+    "ANALYTICS_DB_FILE",
+    "/tmp/bot_analytics.sqlite3" if os.getenv("VERCEL") else "bot_analytics.sqlite3",
+).strip()
+
+URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+MEDIA_URL_RE = re.compile(
+    r"^https?://(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com|instagram\.com|instagr\.am)/\S+$",
+    re.IGNORECASE,
 )
+IMAGE_WORDS = {"rasm", "surat", "image", "picture", "нарисуй", "изображение", "сгенерируй"}
+ADULT_WORDS = {
+    "18+",
+    "porn",
+    "porno",
+    "xxx",
+    "nsfw",
+    "nude",
+    "naked",
+    "yalangoch",
+    "yalang'och",
+    "pornografiya",
+    "порно",
+    "нюд",
+    "голый",
+    "голая",
+    "эротика",
+}
+
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 openai_client_kwargs = {"api_key": AI_API_KEY or "missing"}
 if AI_BASE_URL:
     openai_client_kwargs["base_url"] = AI_BASE_URL
 openai_client = OpenAI(**openai_client_kwargs)
+image_client = OpenAI(api_key=OPENAI_API_KEY or AI_API_KEY or "missing")
 analytics: "AnalyticsStore | None" = None
-sheets: "ExpenseSheets | None" = None
-
-
-@dataclass
-class Expense:
-    amount: float
-    currency: str
-    category: str
-    description: str
-    raw_text: str
 
 
 class AnalyticsStore:
@@ -199,6 +178,11 @@ class AnalyticsStore:
         connection = sqlite3.connect(self.db_file)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def _init_db(self) -> None:
         with self._connect() as connection:
@@ -213,10 +197,13 @@ class AnalyticsStore:
                     message_count INTEGER NOT NULL DEFAULT 0,
                     ai_count INTEGER NOT NULL DEFAULT 0,
                     voice_count INTEGER NOT NULL DEFAULT 0,
-                    expense_count INTEGER NOT NULL DEFAULT 0
+                    image_count INTEGER NOT NULL DEFAULT 0,
+                    media_count INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            self._ensure_column(connection, "users", "image_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "users", "media_count", "INTEGER NOT NULL DEFAULT 0")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS interactions (
@@ -257,8 +244,8 @@ class AnalyticsStore:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO users (user_id, username, full_name, first_seen, last_seen, message_count, ai_count, voice_count, expense_count)
-                VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0)
+                INSERT INTO users (user_id, username, full_name, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     username = excluded.username,
                     full_name = excluded.full_name,
@@ -273,13 +260,15 @@ class AnalyticsStore:
                     message_count = message_count + 1,
                     ai_count = ai_count + ?,
                     voice_count = voice_count + ?,
-                    expense_count = expense_count + ?
+                    image_count = image_count + ?,
+                    media_count = media_count + ?
                 WHERE user_id = ?
                 """,
                 (
-                    1 if action in {"ai", "text"} else 0,
-                    1 if action == "voice" else 0,
-                    1 if action == "expense" and status == "ok" else 0,
+                    1 if action in {"ai", "text"} and status == "ok" else 0,
+                    1 if action == "voice" and status == "ok" else 0,
+                    1 if action == "image" and status == "ok" else 0,
+                    1 if action == "media" and status == "ok" else 0,
                     user_id,
                 ),
             )
@@ -290,6 +279,11 @@ class AnalyticsStore:
                 """,
                 (now, user_id, username, action, status, preview, response_chars, error[:300]),
             )
+
+    def user_image_count(self, user_id: int) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT image_count FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return int(row["image_count"] or 0) if row else 0
 
     def has_sent_report(self, report_key: str) -> bool:
         with self._connect() as connection:
@@ -337,7 +331,8 @@ class AnalyticsStore:
                 FROM interactions
                 WHERE created_at >= ?
                   AND text_preview != ''
-                  AND action IN ('ai', 'text', 'voice', 'youtube')
+                  AND action IN ('ai', 'text', 'voice', 'image', 'media')
+                  AND status = 'ok'
                 GROUP BY LOWER(text_preview)
                 ORDER BY count DESC, MAX(created_at) DESC
                 LIMIT ?
@@ -346,28 +341,7 @@ class AnalyticsStore:
             ).fetchall()
         return [f"{row['text_preview']} ({row['count']}x)" for row in rows]
 
-    def public_summary(self) -> str:
-        counts = self.subscriber_count()
-        top_queries = self.top_queries(days=7, limit=5)
-        lines = [
-            "Premium radar:",
-            f"Jami foydalanuvchi: {counts['total']}",
-            f"Bugun qo'shilgan: {counts['new_today']}",
-            f"7 kunda qo'shilgan: {counts['new_week']}",
-            f"Bugungi faol: {counts['active_today']}",
-            f"7 kunlik faol: {counts['active_week']}",
-            "",
-            "Oxirgi 7 kundagi ko'p so'ralgan yo'nalishlar:",
-        ]
-        lines.extend(f"- {item}" for item in top_queries) if top_queries else lines.append("- Hali yetarli so'rov yo'q")
-        return "\n".join(lines)
-
-    def build_report(
-        self,
-        title: str,
-        start_at: datetime | None = None,
-        end_at: datetime | None = None,
-    ) -> str:
+    def build_report(self, title: str, start_at: datetime | None = None, end_at: datetime | None = None) -> str:
         conditions = []
         params_list: list[Any] = []
         if start_at:
@@ -381,42 +355,20 @@ class AnalyticsStore:
 
         with self._connect() as connection:
             total_users = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            active_users = connection.execute(
-                f"SELECT COUNT(DISTINCT user_id) FROM interactions {where}", params
-            ).fetchone()[0]
+            active_users = connection.execute(f"SELECT COUNT(DISTINCT user_id) FROM interactions {where}", params).fetchone()[0]
             action_rows = connection.execute(
-                f"""
-                SELECT action, COUNT(*) AS count
-                FROM interactions
-                {where}
-                GROUP BY action
-                ORDER BY count DESC
-                """,
+                f"SELECT action, COUNT(*) AS count FROM interactions {where} GROUP BY action ORDER BY count DESC",
                 params,
             ).fetchall()
-            user_rows = connection.execute(
+            top_rows = connection.execute(
                 f"""
-                SELECT
-                    user_id,
-                    COALESCE(username, '') AS username,
-                    COUNT(*) AS count,
-                    SUM(response_chars) AS response_chars,
-                    MAX(created_at) AS last_seen
+                SELECT text_preview, COUNT(*) AS count
                 FROM interactions
                 {where}
-                GROUP BY user_id, username
-                ORDER BY count DESC
-                LIMIT 15
-                """,
-                params,
-            ).fetchall()
-            recent_rows = connection.execute(
-                f"""
-                SELECT created_at, user_id, COALESCE(username, '') AS username, action, status, text_preview
-                FROM interactions
-                {where}
-                ORDER BY created_at DESC
-                LIMIT 20
+                GROUP BY LOWER(text_preview)
+                HAVING text_preview != ''
+                ORDER BY count DESC, MAX(created_at) DESC
+                LIMIT 12
                 """,
                 params,
             ).fetchall()
@@ -429,135 +381,10 @@ class AnalyticsStore:
             "",
             "Ishlatish turi:",
         ]
-        if action_rows:
-            lines.extend(f"- {row['action']}: {row['count']}" for row in action_rows)
-        else:
-            lines.append("- Hali faollik yo'q")
-
-        lines.extend(["", "Eng faol foydalanuvchilar:"])
-        if user_rows:
-            for row in user_rows:
-                username = f"@{row['username']}" if row["username"] else "username yo'q"
-                lines.append(
-                    f"- {row['user_id']} ({username}): {row['count']} marta, "
-                    f"AI javob belgisi: {row['response_chars'] or 0}, oxirgi: {row['last_seen']}"
-                )
-        else:
-            lines.append("- Hali foydalanuvchi yo'q")
-
-        lines.extend(["", "Oxirgi so'rovlar:"])
-        if recent_rows:
-            for row in recent_rows:
-                username = f"@{row['username']}" if row["username"] else str(row["user_id"])
-                lines.append(
-                    f"- {row['created_at']} | {username} | {row['action']} | {row['status']} | {row['text_preview']}"
-                )
-        else:
-            lines.append("- Hali so'rov yo'q")
-
+        lines.extend(f"- {row['action']}: {row['count']}" for row in action_rows) if action_rows else lines.append("- Hali faollik yo'q")
+        lines.extend(["", "Kim ko'p nima qidiryapti / so'rayapti:"])
+        lines.extend(f"- {row['text_preview']} ({row['count']}x)" for row in top_rows) if top_rows else lines.append("- Hali yetarli so'rov yo'q")
         return "\n".join(lines)
-
-
-class ExpenseSheets:
-    def __init__(self) -> None:
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        if GOOGLE_SERVICE_ACCOUNT_JSON:
-            credentials = Credentials.from_service_account_info(
-                json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-                scopes=scopes,
-            )
-        else:
-            credentials = Credentials.from_service_account_file(
-                GOOGLE_SERVICE_ACCOUNT_FILE,
-                scopes=scopes,
-            )
-        self.client = gspread.authorize(credentials)
-
-    def _spreadsheet_title(self, user_id: int, username: str) -> str:
-        return f"Telegram Expenses - {user_id}"
-
-    def _open_or_create_spreadsheet(self, user_id: int, username: str):
-        title = self._spreadsheet_title(user_id, username)
-        try:
-            spreadsheet = self.client.open(title)
-        except gspread.SpreadsheetNotFound:
-            spreadsheet = self.client.create(title, folder_id=GOOGLE_DRIVE_PARENT_FOLDER_ID or None)
-            if SHARE_SPREADSHEET_WITH_EMAIL:
-                spreadsheet.share(SHARE_SPREADSHEET_WITH_EMAIL, perm_type="user", role="writer")
-        return spreadsheet
-
-    def _month_sheet(self, spreadsheet, month_key: str):
-        try:
-            worksheet = spreadsheet.worksheet(month_key)
-        except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=month_key, rows=1000, cols=len(EXPENSE_HEADERS))
-            worksheet.append_row(EXPENSE_HEADERS)
-        return worksheet
-
-    def append_expense(self, user_id: int, username: str, expense: Expense) -> str:
-        now = datetime.now()
-        month_key = now.strftime("%Y-%m")
-        spreadsheet = self._open_or_create_spreadsheet(user_id, username)
-        worksheet = self._month_sheet(spreadsheet, month_key)
-        worksheet.append_row(
-            [
-                now.strftime("%Y-%m-%d"),
-                now.strftime("%H:%M:%S"),
-                user_id,
-                username,
-                expense.amount,
-                expense.currency,
-                expense.category,
-                expense.description,
-                expense.raw_text,
-            ],
-            value_input_option="USER_ENTERED",
-        )
-        return spreadsheet.url
-
-    def rows_for_month(self, user_id: int, username: str, month_key: str) -> list[dict[str, Any]]:
-        spreadsheet = self._open_or_create_spreadsheet(user_id, username)
-        worksheet = self._month_sheet(spreadsheet, month_key)
-        return worksheet.get_all_records()
-
-    def _voice_sheet(self, spreadsheet, sheet_title: str):
-        try:
-            worksheet = spreadsheet.worksheet(sheet_title)
-        except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(
-                title=sheet_title,
-                rows=1000,
-                cols=len(VOICE_REPORT_HEADERS),
-            )
-            worksheet.append_row(VOICE_REPORT_HEADERS)
-        return worksheet
-
-    def append_voice_report(
-        self,
-        user_id: int,
-        username: str,
-        full_name: str,
-        transcript: str,
-    ) -> str:
-        now = datetime.now()
-        month_key = now.strftime("%Y-%m")
-        spreadsheet = self._open_or_create_spreadsheet(user_id, username)
-        worksheet = self._voice_sheet(spreadsheet, f"Voice-{month_key}")
-        worksheet.append_row(
-            [
-                now.strftime("%Y-%m-%d"),
-                now.strftime("%H:%M:%S"),
-                user_id,
-                username,
-                full_name,
-                transcript,
-            ],
-            value_input_option="USER_ENTERED",
-        )
-        return spreadsheet.url
 
 
 def require_config() -> None:
@@ -567,30 +394,44 @@ def require_config() -> None:
     if not AI_API_KEY:
         missing.append("GEMINI_API_KEY yoki GROQ_API_KEY yoki OPENAI_API_KEY")
     if missing:
-        joined = ", ".join(missing)
-        raise RuntimeError(f"Sozlanmagan yoki topilmadi: {joined}. .env faylini ko'ring.")
-
-
-def require_google_config() -> None:
-    if not GOOGLE_SERVICE_ACCOUNT_JSON and not Path(GOOGLE_SERVICE_ACCOUNT_FILE).exists():
-        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON yoki GOOGLE_SERVICE_ACCOUNT_FILE sozlanmagan.")
+        raise RuntimeError(f"Sozlanmagan yoki topilmadi: {', '.join(missing)}. .env faylini ko'ring.")
 
 
 def get_analytics() -> AnalyticsStore:
     global analytics
-
     if analytics is None:
         analytics = AnalyticsStore(ANALYTICS_DB_FILE)
     return analytics
 
 
-def get_sheets() -> ExpenseSheets:
-    global sheets
+def is_owner(user_id: int) -> bool:
+    return OWNER_TELEGRAM_ID != 0 and user_id == OWNER_TELEGRAM_ID
 
-    require_google_config()
-    if sheets is None:
-        sheets = ExpenseSheets()
-    return sheets
+
+def has_premium_access(user_id: int) -> bool:
+    return is_owner(user_id) or user_id in PREMIUM_USER_IDS
+
+
+def parse_payment_plans() -> list[tuple[str, str, str]]:
+    plans = []
+    for raw_plan in PAYMENT_PLANS.split(";"):
+        parts = [part.strip() for part in raw_plan.split(":", 2)]
+        if len(parts) == 3 and parts[0]:
+            plans.append((parts[0], parts[1], parts[2]))
+    return plans
+
+
+def payment_status_text() -> str:
+    lines = ["Pullik tizim:", "Savol-javob cheksiz. Rasm generatsiyasi 10 ta bepul."]
+    lines.append("Sizda Pro ochiq." if PAYMENT_ENABLED else "To'lov rejimi test holatida.")
+    lines.extend(["", "Rejalar:"])
+    for name, price, description in parse_payment_plans():
+        price_text = "bepul" if price == "0" else f"{price} UZS"
+        lines.append(f"- {name}: {price_text} - {description}")
+    lines.append(f"Provider: {PAYMENT_PROVIDER}")
+    if PAYMENT_OWNER_CONTACT:
+        lines.append(f"Aloqa: {PAYMENT_OWNER_CONTACT}")
+    return "\n".join(lines)
 
 
 def email_reports_enabled() -> bool:
@@ -599,60 +440,52 @@ def email_reports_enabled() -> bool:
 
 def send_email(subject: str, body: str) -> None:
     if not email_reports_enabled():
-        logger.info("Email hisobot o'chirilgan: SMTP yoki OWNER_EMAIL sozlanmagan.")
         return
-
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = SMTP_FROM_EMAIL
     message["To"] = OWNER_EMAIL
     message.set_content(body)
-
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
         smtp.starttls()
         smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
         smtp.send_message(message)
 
 
-async def maybe_send_reports() -> None:
+async def send_owner_report(application: Application, subject: str, body: str) -> None:
+    if OWNER_TELEGRAM_ID:
+        await application.bot.send_message(chat_id=OWNER_TELEGRAM_ID, text=body[:4096])
+    await asyncio.to_thread(send_email, subject, body)
+
+
+async def maybe_send_reports(application: Application | None = None) -> None:
     now = datetime.now()
-    if now.weekday() == REPORT_WEEKLY_DAY:
-        report_key = f"weekly-{now.strftime('%Y-%W')}"
-        store = get_analytics()
-        if not store.has_sent_report(report_key):
-            start_at = now - timedelta(days=7)
-            body = store.build_report("Haftalik Telegram bot hisoboti", start_at=start_at)
-            await asyncio.to_thread(send_email, "Haftalik Telegram bot hisoboti", body)
-            store.mark_report_sent(report_key)
-
-    if now.day == 1:
-        this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        previous_month_start = (this_month_start - timedelta(days=1)).replace(day=1)
-        previous_month = previous_month_start.strftime("%Y-%m")
-        report_key = f"monthly-{previous_month}"
-        store = get_analytics()
-        if not store.has_sent_report(report_key):
-            body = store.build_report(
-                f"Oylik Telegram bot hisoboti: {previous_month}",
-                start_at=previous_month_start,
-                end_at=this_month_start,
-            )
-            await asyncio.to_thread(send_email, f"Oylik Telegram bot hisoboti: {previous_month}", body)
-            store.mark_report_sent(report_key)
+    if now.weekday() != REPORT_WEEKLY_DAY:
+        return
+    store = get_analytics()
+    report_key = f"weekly-{now.strftime('%Y-%W')}"
+    if store.has_sent_report(report_key):
+        return
+    body = store.build_report("Haftalik Telegram AI bot hisoboti", start_at=now - timedelta(days=7))
+    if application:
+        await send_owner_report(application, "Haftalik Telegram AI bot hisoboti", body)
+    else:
+        await asyncio.to_thread(send_email, "Haftalik Telegram AI bot hisoboti", body)
+    store.mark_report_sent(report_key)
 
 
-async def report_scheduler() -> None:
+async def report_scheduler(application: Application) -> None:
     while True:
         try:
-            await maybe_send_reports()
+            await maybe_send_reports(application)
         except Exception:
-            logger.exception("Email hisobot yuborishda xato")
+            logger.exception("Haftalik hisobot yuborishda xato")
         await asyncio.sleep(60 * 60)
 
 
 async def start_background_tasks(application: Application) -> None:
     await setup_bot_commands(application)
-    application.bot_data["report_scheduler_task"] = asyncio.create_task(report_scheduler())
+    application.bot_data["report_scheduler_task"] = asyncio.create_task(report_scheduler(application))
 
 
 async def stop_background_tasks(application: Application) -> None:
@@ -668,101 +501,53 @@ async def stop_background_tasks(application: Application) -> None:
 async def setup_bot_commands(application: Application) -> None:
     await application.bot.set_my_commands(
         [
-            BotCommand("start", "Kirish eshigi"),
-            BotCommand("portal", "Premium panel"),
-            BotCommand("radar", "Bot auditoriyasi radari"),
-            BotCommand("necha_yulduz", "Foydalanuvchi soni"),
-            BotCommand("xazina", "Obuna va Pro rejalar"),
-            BotCommand("mantiq_chaqmoq", "Mini savol-javob"),
-            BotCommand("hafta_oynasi", "Haftalik analiz va video ssenariy"),
-            BotCommand("yt_ol", "Ruxsatli YouTube audio/video"),
-            BotCommand("ai", "AI ga savol"),
-            BotCommand("help", "Noodatiy komandalar xaritasi"),
-            BotCommand("report", "Admin statistikasi"),
+            BotCommand("start", "Botni boshlash"),
+            BotCommand("ai", "Guruhda yoki privatda AI savol"),
+            BotCommand("image", "AI rasm generatsiyasi"),
+            BotCommand("media", "Instagram/YouTube audio yoki video"),
+            BotCommand("payment", "Rasm limiti va Pro rejalar"),
+            BotCommand("radar", "Foydalanuvchilar va trendlar"),
+            BotCommand("report", "Admin haftalik hisobot"),
+            BotCommand("help", "Yordam"),
         ]
     )
 
 
-def can_write_expenses(user_id: int) -> bool:
-    return user_id in EXPENSE_ALLOWED_USER_IDS
+def telegram_user_details(update: Update) -> tuple[int, str, str]:
+    user = update.effective_user
+    username = user.username or ""
+    full_name = user.full_name or username or "user"
+    return user.id, username, full_name
 
 
-def is_owner(user_id: int) -> bool:
-    return can_write_expenses(user_id)
+def record_usage(update: Update, action: str, status: str = "ok", text_preview: str = "", response_chars: int = 0, error: str = "") -> None:
+    user_id, username, full_name = telegram_user_details(update)
+    try:
+        get_analytics().record_interaction(user_id, username, full_name, action, status, text_preview, response_chars, error)
+    except Exception:
+        logger.exception("Analytics yozishda xato")
 
 
-def has_premium_access(user_id: int) -> bool:
-    if not PAYMENT_ENABLED:
-        return True
-    return is_owner(user_id) or user_id in PREMIUM_USER_IDS
+def is_group_chat(update: Update) -> bool:
+    chat = update.effective_chat
+    return chat is not None and chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
 
 
-def premium_required_text() -> str:
-    lines = [
-        "Premium rejim yoqilgan.",
-        "AI, ovozli javob va yuklash funksiyalari faqat Pro foydalanuvchilar uchun ochiq.",
-        "",
-        payment_status_text(),
-    ]
-    return "\n".join(lines)
+def contains_adult_content(text: str) -> bool:
+    lowered = text.lower()
+    return any(word in lowered for word in ADULT_WORDS)
 
 
-def parse_payment_plans() -> list[tuple[str, str, str]]:
-    plans = []
-    for raw_plan in PAYMENT_PLANS.split(";"):
-        parts = [part.strip() for part in raw_plan.split(":", 2)]
-        if len(parts) == 3 and parts[0]:
-            plans.append((parts[0], parts[1], parts[2]))
-    return plans
-
-
-def payment_status_text() -> str:
-    plans = parse_payment_plans()
-    lines = [
-        "Premium markaz:",
-        "Status: yoqilgan" if PAYMENT_ENABLED else "Status: hozircha hammaga ochiq.",
-        "",
-        "Rejalar:",
-    ]
-    if plans:
-        for name, price, description in plans:
-            price_text = "bepul" if price == "0" else f"{price} UZS"
-            lines.append(f"- {name}: {price_text} - {description}")
-    else:
-        lines.append("- Hali reja kiritilmagan.")
-
-    lines.extend(["", f"Provider: {PAYMENT_PROVIDER}"])
-    if PAYMENT_OWNER_CONTACT:
-        lines.append(f"Aloqa: {PAYMENT_OWNER_CONTACT}")
-    if not PAYMENT_ENABLED:
-        lines.append("")
-        lines.append("Obunachilar ko'payganda admin PAYMENT_ENABLED=true qilib Pro rejimni yoqadi.")
-    return "\n".join(lines)
-
-
-def clean_json_response(content: str) -> str:
-    cleaned = content.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.removeprefix("```json").removeprefix("```").strip()
-        cleaned = cleaned.removesuffix("```").strip()
-    return cleaned
+def looks_like_image_request(text: str) -> bool:
+    lowered = text.lower()
+    return any(word in lowered for word in IMAGE_WORDS)
 
 
 def is_transient_ai_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(
         token in message
-        for token in [
-            "503",
-            "unavailable",
-            "high demand",
-            "temporarily unavailable",
-            "rate limit",
-            "resource_exhausted",
-            "timeout",
-            "connection reset",
-            "connection aborted",
-        ]
+        for token in ["503", "unavailable", "high demand", "temporarily unavailable", "rate limit", "timeout", "connection reset"]
     )
 
 
@@ -774,104 +559,21 @@ def ai_call_with_retries(callable_obj, retries: int = 3, initial_delay: float = 
         except Exception as exc:
             if attempt == retries or not is_transient_ai_error(exc):
                 raise
-            logger.warning(
-                "AI request transient error, retrying %d/%d after %.1fs: %s",
-                attempt,
-                retries,
-                delay,
-                exc,
-            )
+            logger.warning("AI request transient error, retrying %d/%d after %.1fs: %s", attempt, retries, delay, exc)
             time.sleep(delay)
             delay = min(delay * 2, 5.0)
 
 
 def friendly_error(exc: Exception) -> str:
     message = str(exc)
-    if "permission" in message.lower() or "403" in message:
+    lowered = message.lower()
+    if "permission" in lowered or "403" in message:
         return "AI xizmatiga kirish ruxsati yo'q. API key yoki billingni tekshiring."
-    if "503" in message or "unavailable" in message.lower() or "high demand" in message.lower():
-        return (
-            "AI modeli hozir yuqori talab ostida yoki vaqtincha mavjud emas. "
-            "Iltimos, birozdan keyin qayta urinib ko'ring."
-        )
-    if "connecterror" in message.lower() or "connection" in message.lower():
+    if "503" in message or "unavailable" in lowered or "high demand" in lowered:
+        return "AI modeli hozir band. Birozdan keyin qayta urinib ko'ring."
+    if "connect" in lowered or "connection" in lowered:
         return "Internet yoki API ulanishida muammo bor. Birozdan keyin qayta urinib ko'ring."
     return message[:700]
-
-
-def parse_expense(text: str) -> Expense:
-    prompt = f"""
-Matndan xarajat ma'lumotini ajrat.
-Faqat JSON qaytar:
-{{
-  "amount": number,
-  "currency": "UZS yoki USD yoki boshqa",
-  "category": "ovqat|transport|uy|internet|kiyim|sog'liq|ta'lim|boshqa",
-  "description": "qisqa izoh"
-}}
-
-Agar valyuta aytilmagan bo'lsa UZS deb ol.
-Matn: {text}
-""".strip()
-
-    response = ai_call_with_retries(
-        lambda: openai_client.chat.completions.create(
-            model=OPENAI_TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": "Faqat valid JSON qaytaring. Markdown ishlatmang."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-        )
-    )
-    content = clean_json_response(response.choices[0].message.content or "")
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"AI xarajatni JSON formatida qaytarmadi: {content}") from exc
-
-    amount = float(data["amount"])
-    if amount <= 0:
-        raise ValueError("Xarajat summasi 0 dan katta bo'lishi kerak.")
-
-    return Expense(
-        amount=amount,
-        currency=str(data.get("currency") or "UZS").upper(),
-        category=str(data.get("category") or "boshqa"),
-        description=str(data.get("description") or text),
-        raw_text=text,
-    )
-
-
-def telegram_user_details(update: Update) -> tuple[int, str, str]:
-    user = update.effective_user
-    username = user.username or ""
-    full_name = user.full_name or username or "user"
-    return user.id, username, full_name
-
-
-def record_usage(
-    update: Update,
-    action: str,
-    status: str = "ok",
-    text_preview: str = "",
-    response_chars: int = 0,
-    error: str = "",
-) -> None:
-    user_id, username, full_name = telegram_user_details(update)
-    try:
-        get_analytics().record_interaction(
-            user_id=user_id,
-            username=username,
-            full_name=full_name,
-            action=action,
-            status=status,
-            text_preview=text_preview,
-            response_chars=response_chars,
-            error=error,
-        )
-    except Exception:
-        logger.exception("Analytics yozishda xato")
 
 
 async def ask_ai(text: str) -> str:
@@ -883,14 +585,16 @@ async def ask_ai(text: str) -> str:
                     {
                         "role": "system",
                         "content": (
-                            "Siz Telegram bot ichidagi foydali AI yordamchisiz. "
-                            "Javoblarni foydalanuvchi yozgan tilda, aniq, foydali va qisqa bering. "
-                            "Savolga bevosita javob bering, keraksiz kirish gaplarni yozmang."
+                            "Siz Telegram ichidagi zamonaviy AI yordamchisiz. "
+                            "Asosan o'zbekcha, ruscha va inglizcha muloqot qiling; foydalanuvchi qaysi tilda yozsa, shu tilda javob bering. "
+                            "Javoblar aniq, foydali, tabiiy va qisqa bo'lsin. "
+                            "18+ pornografik, jinsiy ekspluatatsiya yoki noqonuniy materiallarni yaratmang, topmang va tarqatmang. "
+                            "Bunday so'rovda qisqa rad etib, xavfsiz alternativ taklif qiling."
                         ),
                     },
                     {"role": "user", "content": text},
                 ],
-                temperature=0.4,
+                temperature=0.45,
             )
         )
     )
@@ -900,26 +604,17 @@ async def ask_ai(text: str) -> str:
 async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
     voice = update.message.voice
     telegram_file = await context.bot.get_file(voice.file_id)
-
     with tempfile.TemporaryDirectory() as tmp_dir:
         audio_path = Path(tmp_dir) / "voice.ogg"
         await telegram_file.download_to_drive(custom_path=str(audio_path))
-
         if AI_PROVIDER == "gemini":
-            # Gemini native REST API orqali transkripsiya
-            audio_bytes = audio_path.read_bytes()
-            audio_b64 = __import__("base64").b64encode(audio_bytes).decode()
+            audio_b64 = base64.b64encode(audio_path.read_bytes()).decode()
             payload = {
                 "contents": [
                     {
                         "parts": [
-                            {
-                                "inline_data": {
-                                    "mime_type": "audio/ogg",
-                                    "data": audio_b64,
-                                }
-                            },
-                            {"text": "Ushbu ovozni matnga aylantir. Faqat matni yoz, hech narsa qo'shma."},
+                            {"inline_data": {"mime_type": "audio/ogg", "data": audio_b64}},
+                            {"text": "Ushbu ovozni matnga aylantir. Faqat matnni yoz."},
                         ]
                     }
                 ]
@@ -929,410 +624,287 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
                 result = resp.json()
-            text = result["candidates"][0]["content"]["parts"][0]["text"]
-            return text.strip()
-        else:
-            with audio_path.open("rb") as audio_file:
-                transcription = await asyncio.to_thread(
-                    lambda: ai_call_with_retries(
-                        lambda: openai_client.audio.transcriptions.create(
-                            model=OPENAI_TRANSCRIBE_MODEL,
-                            file=audio_file,
-                        )
-                    )
+            return result["candidates"][0]["content"]["parts"][0]["text"].strip()
+        with audio_path.open("rb") as audio_file:
+            transcription = await asyncio.to_thread(
+                lambda: ai_call_with_retries(
+                    lambda: openai_client.audio.transcriptions.create(model=OPENAI_TRANSCRIBE_MODEL, file=audio_file)
                 )
-            return transcription.text.strip()
+            )
+        return transcription.text.strip()
+
+
+async def generate_image(prompt: str) -> Path:
+    if not IMAGE_GENERATION_ENABLED:
+        raise RuntimeError("Rasm generatsiyasi hozir o'chirilgan.")
+    if not OPENAI_API_KEY:
+        raise RuntimeError("Rasm generatsiyasi uchun OPENAI_API_KEY kerak.")
+    if contains_adult_content(prompt):
+        raise ValueError("18+ yoki pornografik rasm so'rovlari qo'llab-quvvatlanmaydi.")
+    response = await asyncio.to_thread(
+        lambda: image_client.images.generate(
+            model=IMAGE_MODEL,
+            prompt=(
+                "High quality, clean, safe-for-work image. No nudity, no sexual content, no gore. "
+                f"User prompt: {prompt}"
+            ),
+            size=IMAGE_SIZE,
+            n=1,
+        )
+    )
+    image_data = response.data[0]
+    output_path = Path(tempfile.mkdtemp(prefix="ai-image-")) / "image.png"
+    if getattr(image_data, "b64_json", None):
+        output_path.write_bytes(base64.b64decode(image_data.b64_json))
+        return output_path
+    if getattr(image_data, "url", None):
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(image_data.url)
+            resp.raise_for_status()
+            output_path.write_bytes(resp.content)
+            return output_path
+    raise RuntimeError("AI rasm qaytarmadi.")
+
+
+def image_limit_text(user_id: int) -> str:
+    used = get_analytics().user_image_count(user_id)
+    if has_premium_access(user_id):
+        return f"Pro status: rasm generatsiyasi ochiq. Ishlatilgan: {used}."
+    left = max(IMAGE_FREE_LIMIT - used, 0)
+    return f"Bepul rasm limiti: {used}/{IMAGE_FREE_LIMIT}. Qoldi: {left}."
+
+
+def image_payment_required_text() -> str:
+    return "10 ta bepul rasm limiti tugadi.\n\n" + payment_status_text()
+
+
+def download_media(url: str, media_type: str) -> tuple[Path, str]:
+    try:
+        import yt_dlp
+    except ImportError as exc:
+        raise RuntimeError("yt-dlp o'rnatilmagan. requirements.txt yangilang va deployni qayta qiling.") from exc
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="media-"))
+    output_template = str(tmp_dir / "%(title).80s-%(id)s.%(ext)s")
+    options: dict[str, Any] = {
+        "outtmpl": output_template,
+        "noplaylist": True,
+        "quiet": True,
+        "max_filesize": MEDIA_MAX_MB * 1024 * 1024,
+    }
+    if media_type == "audio":
+        options["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+    else:
+        options["format"] = f"best[filesize<{MEDIA_MAX_MB}M]/bestvideo[filesize<{MEDIA_MAX_MB}M]+bestaudio/best"
+
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+        title = str(info.get("title") or "media")
+        age_limit = int(info.get("age_limit") or 0)
+        if age_limit >= 18 or contains_adult_content(title):
+            raise ValueError("18+ media tarqatilmaydi.")
+        downloaded = sorted(tmp_dir.glob("*"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if not downloaded:
+            raise RuntimeError("Yuklangan fayl topilmadi.")
+        file_path = downloaded[0]
+
+    if file_path.stat().st_size > MEDIA_MAX_MB * 1024 * 1024:
+        raise RuntimeError(f"Fayl {MEDIA_MAX_MB} MB limitdan katta. Qisqaroq video yuboring.")
+    return file_path, title
+
+
+def media_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Audio", callback_data="media|audio"),
+                InlineKeyboardButton("Video", callback_data="media|video"),
+            ]
+        ]
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     record_usage(update, "start")
-    expense_status = (
-        "Sizda xarajat yozish ruxsati bor."
-        if can_write_expenses(user.id)
-        else "Siz AI yordamchidan foydalanishingiz mumkin."
-    )
     await update.message.reply_text(
-        "Salom! Men premium AI yordamchi botman.\n\n"
-        f"Sizning Telegram user ID: {user.id}\n\n"
-        f"{expense_status}\n\n"
-        "Matn yoki ovozli xabar yuboring, men javob beraman.\n\n"
-        "/portal - premium panel\n"
-        "/radar - foydalanuvchi va trendlar\n"
-        "/mantiq_chaqmoq - mini quiz\n"
-        "/yt_ol audio LINK - ruxsatli YouTube audio\n"
-        "/help - komandalar xaritasi"
+        "Salom! Men AI Telegram botman.\n\n"
+        "Uzbekcha, ruscha va inglizcha savollarga javob beraman, ovozli xabarni tushunaman, rasm chizaman, "
+        "Instagram/YouTube linklaridan audio yoki video tanlashga yordam beraman.\n\n"
+        f"Sizning Telegram ID: {user.id}\n"
+        f"{image_limit_text(user.id)}\n\n"
+        "Privatda savolni oddiy yozing. Guruhlarda meni /ai savol orqali chaqiring."
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_usage(update, "help")
     await update.message.reply_text(
-        "Noodatiy komandalar xaritasi:\n"
-        "/portal - premium panel va profilingiz\n"
-        "/radar - obunachi soni, faollik va trendlar\n"
-        "/necha_yulduz - bot qancha foydalanuvchi yig'ganini ko'rish\n"
-        "/xazina - Pro rejalar va to'lov statusi\n"
-        "/mantiq_chaqmoq - mini savol-javob\n"
-        "/hafta_oynasi - haftalik analiz va video ssenariy\n"
-        "/yt_ol audio LINK - ruxsatli YouTube audioni olish\n"
-        "/yt_ol video LINK - ruxsatli YouTube videoni olish\n"
-        "/ai savol - AI ga aniq savol berish\n\n"
-        "Admin komandalar:\n"
-        "/report - 7 kunlik statistika\n"
-        "/report month - 31 kunlik statistika\n"
-        "/expense 25000 ovqat - xarajat qo'shish\n"
-        "/month - oylik Excel"
-    )
-
-
-async def setting_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    record_usage(update, "setting")
-    role = "admin" if is_owner(user.id) else "foydalanuvchi"
-    username = f"@{user.username}" if user.username else "yo'q"
-    await update.message.reply_text(
-        "Sozlamalar:\n"
-        f"User ID: {user.id}\n"
-        f"Username: {username}\n"
-        f"Rol: {role}\n"
-        f"AI provider: {AI_PROVIDER}\n"
-        f"AI model: {OPENAI_TEXT_MODEL}\n"
-        f"To'lov: {'yoqilgan' if PAYMENT_ENABLED else 'hozircha ochirilgan'}\n"
-        f"Xarajat yozish: {'ruxsat bor' if can_write_expenses(user.id) else 'ruxsat yoq'}"
+        "/ai savol - AI javob\n"
+        "/image prompt - rasm generatsiyasi\n"
+        "/media audio LINK - YouTube/Instagram audio\n"
+        "/media video LINK - YouTube/Instagram video\n"
+        "/payment - limit va to'lov ma'lumoti\n"
+        "/radar - trendlar\n\n"
+        "Privatda matn yoki ovoz yuborsangiz ham AI javob beradi. Guruhlarda faqat /ai orqali ishlayman."
     )
 
 
 async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     record_usage(update, "payment")
-    await update.message.reply_text(payment_status_text())
+    await update.message.reply_text(f"{image_limit_text(update.effective_user.id)}\n\n{payment_status_text()}")
 
 
 async def radar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("Radar faqat bot egasi uchun.")
+        record_usage(update, "radar", status="denied")
+        return
+    counts = get_analytics().subscriber_count()
+    top_queries = get_analytics().top_queries(days=7, limit=10)
+    lines = [
+        "Bot radari:",
+        f"Jami foydalanuvchi: {counts['total']}",
+        f"Bugun qo'shilgan: {counts['new_today']}",
+        f"7 kunda qo'shilgan: {counts['new_week']}",
+        f"Bugungi faol: {counts['active_today']}",
+        f"7 kunlik faol: {counts['active_week']}",
+        "",
+        "Ko'p qidirilgan/so'ralganlar:",
+    ]
+    lines.extend(f"- {item}" for item in top_queries) if top_queries else lines.append("- Hali yetarli so'rov yo'q")
     record_usage(update, "radar")
-    await update.message.reply_text(get_analytics().public_summary()[:4096])
+    await update.message.reply_text("\n".join(lines)[:4096])
 
 
-async def premium_portal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    record_usage(update, "portal")
-    status = "Pro ochiq" if has_premium_access(user.id) else "Pro kerak"
-    await update.message.reply_text(
-        "Premium panel:\n"
-        f"Profil: {user.full_name}\n"
-        f"AI provider: {AI_PROVIDER}\n"
-        f"Model: {OPENAI_TEXT_MODEL}\n"
-        f"Ovoz modeli: {OPENAI_TRANSCRIBE_MODEL}\n"
-        f"Status: {status}\n"
-        f"To'lov rejimi: {'yoqilgan' if PAYMENT_ENABLED else 'hammaga ochiq'}\n\n"
-        "Tez komandalar:\n"
-        "/radar - auditoriya va trendlar\n"
-        "/mantiq_chaqmoq - mini quiz\n"
-        "/yt_ol audio LINK - ruxsatli audio\n"
-        "/yt_ol video LINK - ruxsatli video"
-    )
-
-
-async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not has_premium_access(update.effective_user.id):
-        await update.message.reply_text(premium_required_text())
-        record_usage(update, "quiz", status="payment_required")
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("Hisobot faqat bot egasi uchun.")
+        record_usage(update, "report", status="denied")
         return
-    await update.message.chat.send_action(ChatAction.TYPING)
-    prompt = (
-        "O'zbek tilida bitta noodatiy, qiziqarli mini savol-javob tuz. "
-        "Format: Savol, A/B/C variantlar, oxirida 'Javobni bilish uchun: /ai javob ...' deb yoz."
-    )
-    try:
-        answer = await ask_ai(prompt)
-    except Exception as exc:
-        logger.exception("Quiz generation failed")
-        record_usage(update, "quiz", status="error", error=str(exc))
-        await update.message.reply_text(f"Quiz tayyorlanmadi: {friendly_error(exc)}")
+    report = get_analytics().build_report("Oxirgi 7 kunlik Telegram AI bot hisoboti", start_at=datetime.now() - timedelta(days=7))
+    record_usage(update, "report")
+    await update.message.reply_text(report[:4096])
+
+
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = " ".join(context.args).strip()
+    if not text:
+        await update.message.reply_text("Savolni ham yozing: /ai nima yordam bera olasan?")
+        record_usage(update, "ai", status="empty")
         return
-    record_usage(update, "quiz", response_chars=len(answer))
-    await update.message.reply_text(answer[:4096])
+    await answer_text(update, text, action="ai")
 
 
-async def weekly_video_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not is_owner(user.id):
-        await update.message.reply_text("Haftalik chuqur analiz faqat admin uchun.")
-        record_usage(update, "weekly_video", status="denied")
+async def image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    prompt = " ".join(context.args).strip()
+    if not prompt:
+        await update.message.reply_text("Rasm uchun prompt yozing: /image futuristik Toshkent")
+        record_usage(update, "image", status="empty")
         return
+    await handle_image_request(update, prompt)
 
-    report = get_analytics().build_report(
-        "Oxirgi 7 kunlik bot analizi",
-        start_at=datetime.now() - timedelta(days=7),
-    )
-    prompt = (
-        "Quyidagi Telegram bot statistikasi asosida Uzbek tilida 45-60 soniyalik video ssenariy tuz. "
-        "Natija: 1) qisqa hook, 2) kadrlar ketma-ketligi, 3) ekranga chiqadigan matnlar, "
-        "4) ovoz matni, 5) keyingi hafta uchun 3 taklif. Raqamlarni aniq ishlat.\n\n"
-        f"{report}"
-    )
-    await update.message.chat.send_action(ChatAction.TYPING)
-    try:
-        answer = await ask_ai(prompt)
-    except Exception as exc:
-        logger.exception("Weekly video script failed")
-        record_usage(update, "weekly_video", status="error", error=str(exc))
-        await update.message.reply_text(f"Video ssenariy tayyorlanmadi: {friendly_error(exc)}")
+
+async def media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not MEDIA_DOWNLOAD_ENABLED:
+        await update.message.reply_text("Media yuklash hozir o'chirilgan.")
+        record_usage(update, "media", status="disabled")
         return
-
-    record_usage(update, "weekly_video", response_chars=len(answer))
-    await update.message.reply_text(answer[:4096])
-
-
-YOUTUBE_URL_RE = re.compile(r"^https?://(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)/\S+$", re.IGNORECASE)
-
-
-def download_youtube_media(url: str, media_type: str) -> tuple[Path, str]:
-    try:
-        import yt_dlp
-    except ImportError as exc:
-        raise RuntimeError("yt-dlp o'rnatilmagan. requirements.txt yangilang va deployni qayta qiling.") from exc
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix="yt-"))
-    output_template = str(tmp_dir / "%(title).80s-%(id)s.%(ext)s")
-    if media_type == "audio":
-        options = {
-            "format": "bestaudio[ext=m4a]/bestaudio/best",
-            "outtmpl": output_template,
-            "noplaylist": True,
-            "quiet": True,
-        }
-    else:
-        options = {
-            "format": "best[filesize<45M]/bestvideo[filesize<45M]+bestaudio/best",
-            "outtmpl": output_template,
-            "noplaylist": True,
-            "quiet": True,
-        }
-
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=True)
-        title = str(info.get("title") or "YouTube media")
-        downloaded = sorted(tmp_dir.glob("*"), key=lambda path: path.stat().st_mtime, reverse=True)
-        if not downloaded:
-            raise RuntimeError("Yuklangan fayl topilmadi.")
-        file_path = downloaded[0]
-
-    max_bytes = YOUTUBE_MAX_MB * 1024 * 1024
-    if file_path.stat().st_size > max_bytes:
-        raise RuntimeError(f"Fayl {YOUTUBE_MAX_MB} MB limitdan katta. Qisqaroq video yuboring.")
-    return file_path, title
-
-
-async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not YOUTUBE_DOWNLOAD_ENABLED:
-        await update.message.reply_text(
-            "YouTube yuklash hozir o'chirilgan. Admin YOUTUBE_DOWNLOAD_ENABLED=true qilsa ochiladi."
-        )
-        record_usage(update, "youtube", status="disabled")
-        return
-    if YOUTUBE_OWNER_ONLY and not is_owner(user.id):
-        await update.message.reply_text("YouTube yuklash hozircha faqat admin uchun ochilgan.")
-        record_usage(update, "youtube", status="owner_only")
-        return
-    if not has_premium_access(user.id):
-        await update.message.reply_text(premium_required_text())
-        record_usage(update, "youtube", status="payment_required")
-        return
-
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "Format: /yt_ol audio https://youtu.be/... yoki /yt_ol video https://youtu.be/...\n"
-            "Faqat o'zingizga tegishli, ruxsat berilgan yoki Creative Commons materiallarni yuklang."
-        )
-        record_usage(update, "youtube", status="empty")
+        await update.message.reply_text("Format: /media audio LINK yoki /media video LINK")
+        record_usage(update, "media", status="empty")
         return
-
     media_type = context.args[0].strip().lower()
     url = context.args[1].strip()
     if media_type not in {"audio", "video"}:
         await update.message.reply_text("Birinchi so'z audio yoki video bo'lishi kerak.")
-        record_usage(update, "youtube", status="bad_type", text_preview=" ".join(context.args))
+        record_usage(update, "media", status="bad_type", text_preview=" ".join(context.args))
         return
-    if not YOUTUBE_URL_RE.match(url):
-        await update.message.reply_text("YouTube link noto'g'ri ko'rinyapti.")
-        record_usage(update, "youtube", status="bad_url", text_preview=url)
-        return
+    await handle_media_download(update, url, media_type)
 
-    await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+
+async def media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    _, media_type = query.data.split("|", 1)
+    url = context.user_data.get("pending_media_url", "")
+    if not url:
+        await query.message.reply_text("Link topilmadi. Iltimos, linkni qayta yuboring.")
+        return
+    await handle_media_download(update, url, media_type, from_callback=True)
+
+
+async def handle_media_download(update: Update, url: str, media_type: str, from_callback: bool = False) -> None:
+    message = update.effective_message
+    if not MEDIA_URL_RE.match(url):
+        await message.reply_text("Faqat YouTube yoki Instagram link yuboring.")
+        record_usage(update, "media", status="bad_url", text_preview=url)
+        return
+    if contains_adult_content(url):
+        await message.reply_text("18+ materiallar tarqatilmaydi.")
+        record_usage(update, "media", status="adult_blocked", text_preview=url)
+        return
+    await message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
     try:
-        file_path, title = await asyncio.to_thread(download_youtube_media, url, media_type)
+        file_path, title = await asyncio.to_thread(download_media, url, media_type)
         with file_path.open("rb") as media_file:
             if media_type == "audio":
-                await update.message.reply_audio(audio=media_file, title=title[:64], filename=file_path.name)
+                await message.reply_audio(audio=media_file, title=title[:64], filename=file_path.name)
             else:
-                await update.message.reply_document(
-                    document=media_file,
-                    filename=file_path.name,
-                    caption=title[:900],
-                )
+                await message.reply_document(document=media_file, filename=file_path.name, caption=title[:900])
     except Exception as exc:
-        logger.exception("YouTube download failed")
-        record_usage(update, "youtube", status="error", text_preview=url, error=str(exc))
-        await update.message.reply_text(f"YouTube fayl tayyorlanmadi: {friendly_error(exc)}")
+        logger.exception("Media download failed")
+        record_usage(update, "media", status="error", text_preview=url, error=str(exc))
+        await message.reply_text(f"Media tayyorlanmadi: {friendly_error(exc)}")
         return
-    record_usage(update, "youtube", text_preview=url)
+    record_usage(update, "media", text_preview=url)
+    if from_callback:
+        try:
+            await update.callback_query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            logger.debug("Callback markupni o'chirib bo'lmadi", exc_info=True)
 
 
-async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not has_premium_access(update.effective_user.id):
-        await update.message.reply_text(premium_required_text())
-        record_usage(update, "ai", status="payment_required")
-        return
-    text = " ".join(context.args).strip()
-    if not text:
-        await update.message.reply_text("Savolni ham yozing: /ai biznes reja tuzib ber")
-        record_usage(update, "ai", status="empty")
+async def answer_text(update: Update, text: str, action: str = "text") -> None:
+    if contains_adult_content(text):
+        await update.message.reply_text("18+ materiallar bo'yicha yordam bera olmayman. Xavfsiz, ta'limiy yoki ijodiy mavzu tanlang.")
+        record_usage(update, action, status="adult_blocked", text_preview=text)
         return
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
         answer = await ask_ai(text)
     except Exception as exc:
         logger.exception("AI request failed")
-        record_usage(update, "ai", status="error", text_preview=text, error=str(exc))
+        record_usage(update, action, status="error", text_preview=text, error=str(exc))
         await update.message.reply_text(f"AI javob bera olmadi: {friendly_error(exc)}")
         return
-    record_usage(update, "ai", text_preview=text, response_chars=len(answer))
+    record_usage(update, action, text_preview=text, response_chars=len(answer))
     await update.message.reply_text(answer[:4096])
 
 
-async def expense_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not can_write_expenses(user.id):
-        await update.message.reply_text("Bu botda xarajat yozish faqat egasi uchun yoqilgan. Siz AI bilan ishlashingiz mumkin.")
-        record_usage(update, "expense", status="denied")
+async def handle_image_request(update: Update, prompt: str) -> None:
+    user_id = update.effective_user.id
+    if not has_premium_access(user_id) and get_analytics().user_image_count(user_id) >= IMAGE_FREE_LIMIT:
+        await update.message.reply_text(image_payment_required_text())
+        record_usage(update, "image", status="payment_required", text_preview=prompt)
         return
-    text = " ".join(context.args).strip()
-    if not text:
-        await update.message.reply_text("Masalan: /expense 45000 ovqat yoki /expense taksi 25000")
-        record_usage(update, "expense", status="empty")
-        return
-    await save_expense_from_text(update, text)
-
-
-async def save_expense_from_text(update: Update, text: str) -> None:
-    user = update.effective_user
-    username = user.username or user.full_name or "user"
-    await update.message.chat.send_action(ChatAction.TYPING)
+    await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
     try:
-        expense = await asyncio.to_thread(parse_expense, text)
-        sheet_url = await asyncio.to_thread(lambda: get_sheets().append_expense(user.id, username, expense))
+        image_path = await generate_image(prompt)
+        with image_path.open("rb") as image_file:
+            await update.message.reply_photo(photo=image_file, caption=image_limit_text(user_id)[:1000])
     except Exception as exc:
-        logger.exception("Expense save failed")
-        record_usage(update, "expense", status="error", text_preview=text, error=str(exc))
-        await update.message.reply_text(f"Xarajatni yozib bo'lmadi: {exc}")
+        logger.exception("Image generation failed")
+        record_usage(update, "image", status="error", text_preview=prompt, error=str(exc))
+        await update.message.reply_text(f"Rasm tayyorlanmadi: {friendly_error(exc)}")
         return
-
-    record_usage(update, "expense", text_preview=text)
-    await update.message.reply_text(
-        "Xarajat yozildi:\n"
-        f"Summa: {expense.amount:g} {expense.currency}\n"
-        f"Kategoriya: {expense.category}\n"
-        f"Izoh: {expense.description}\n"
-        f"Google Sheets: {sheet_url}"
-    )
-
-
-async def month_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not can_write_expenses(user.id):
-        await update.message.reply_text("Oylik xarajat fayli faqat xarajat yozish ruxsati bor foydalanuvchilar uchun.")
-        record_usage(update, "month", status="denied")
-        return
-
-    month_key = context.args[0].strip() if context.args else datetime.now().strftime("%Y-%m")
-    try:
-        datetime.strptime(month_key, "%Y-%m")
-    except ValueError:
-        await update.message.reply_text("Oy formati noto'g'ri. Masalan: /month 2026-05")
-        record_usage(update, "month", status="bad_month")
-        return
-
-    username = user.username or user.full_name or "user"
-    rows = await asyncio.to_thread(lambda: get_sheets().rows_for_month(user.id, username, month_key))
-    if not rows:
-        await update.message.reply_text(f"{month_key} oyida xarajat topilmadi.")
-        record_usage(update, "month", status="empty", text_preview=month_key)
-        return
-
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet.title = month_key
-    worksheet.append(EXPENSE_HEADERS)
-    total_by_currency: dict[str, float] = {}
-
-    for row in rows:
-        values = [row.get(header, "") for header in EXPENSE_HEADERS]
-        worksheet.append(values)
-        currency = str(row.get("currency", "UZS") or "UZS")
-        amount = float(row.get("amount", 0) or 0)
-        total_by_currency[currency] = total_by_currency.get(currency, 0) + amount
-
-    worksheet.append([])
-    worksheet.append(["TOTAL"])
-    for currency, total in sorted(total_by_currency.items()):
-        worksheet.append([currency, total])
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        report_path = Path(tmp_dir) / f"expenses-{user.id}-{month_key}.xlsx"
-        workbook.save(report_path)
-        with report_path.open("rb") as report_file:
-            await update.message.reply_document(
-                document=report_file,
-                filename=report_path.name,
-                caption=f"{month_key} xarajatlar hisoboti",
-            )
-    record_usage(update, "month", text_preview=month_key)
-
-
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not can_write_expenses(user.id):
-        await update.message.reply_text("Bu hisobot faqat bot egasi uchun.")
-        record_usage(update, "report", status="denied")
-        return
-
-    period = context.args[0].strip().lower() if context.args else "week"
-    if period in {"month", "oy"}:
-        start_at = datetime.now() - timedelta(days=31)
-        title = "Oxirgi 31 kunlik Telegram bot hisoboti"
-    else:
-        start_at = datetime.now() - timedelta(days=7)
-        title = "Oxirgi 7 kunlik Telegram bot hisoboti"
-
-    report = get_analytics().build_report(title, start_at=start_at)
-    record_usage(update, "report", text_preview=period)
-    await update.message.reply_text(report[:4096])
-
-
-async def save_voice_transcript_report(update: Update, transcript: str) -> None:
-    if not transcript.strip():
-        return
-    user_id, username, full_name = telegram_user_details(update)
-    try:
-        await asyncio.to_thread(
-            lambda: get_sheets().append_voice_report(
-                user_id=user_id,
-                username=username or full_name,
-                full_name=full_name,
-                transcript=transcript,
-            )
-        )
-    except Exception:
-        logger.exception("Voice report save failed")
+    record_usage(update, "image", text_preview=prompt)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not has_premium_access(user.id):
-        await update.message.reply_text(premium_required_text())
-        record_usage(update, "voice", status="payment_required")
+    if is_group_chat(update):
+        await update.message.reply_text("Guruhlarda ovozli AI uchun /ai komandasi bilan matn yozing. Privatda voice yuborsangiz javob beraman.")
+        record_usage(update, "voice", status="group_ignored")
         return
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
@@ -1342,50 +914,46 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         record_usage(update, "voice", status="error", error=str(exc))
         await update.message.reply_text(f"Ovozni matnga aylantirib bo'lmadi: {friendly_error(exc)}")
         return
-
     record_usage(update, "voice", text_preview=text)
-    await save_voice_transcript_report(update, text)
-    if can_write_expenses(user.id):
-        await update.message.reply_text(f"Ovozdan o'qilgan matn: {text}")
-        await save_expense_from_text(update, text)
-        return
-
-    try:
-        answer = await ask_ai(text)
-    except Exception as exc:
-        logger.exception("AI voice answer failed")
-        record_usage(update, "ai", status="error", text_preview=text, error=str(exc))
-        await update.message.reply_text(f"AI javob bera olmadi: {friendly_error(exc)}")
-        return
-    record_usage(update, "ai", text_preview=text, response_chars=len(answer))
-    await update.message.reply_text(answer[:4096])
+    await answer_text(update, text, action="ai")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not has_premium_access(update.effective_user.id):
-        await update.message.reply_text(premium_required_text())
-        record_usage(update, "text", status="payment_required")
-        return
     text = update.message.text.strip()
-    await update.message.chat.send_action(ChatAction.TYPING)
-    try:
-        answer = await ask_ai(text)
-    except Exception as exc:
-        logger.exception("AI text answer failed")
-        record_usage(update, "text", status="error", text_preview=text, error=str(exc))
-        await update.message.reply_text(f"AI javob bera olmadi: {friendly_error(exc)}")
+    urls = URL_RE.findall(text)
+    if urls and MEDIA_URL_RE.match(urls[0]):
+        context.user_data["pending_media_url"] = urls[0]
+        await update.message.reply_text(
+            "Nimani olishni tanlang:",
+            reply_markup=media_keyboard(),
+        )
+        record_usage(update, "media", status="choice", text_preview=urls[0])
         return
-    record_usage(update, "text", text_preview=text, response_chars=len(answer))
-    await update.message.reply_text(answer[:4096])
+    if is_group_chat(update):
+        return
+    if looks_like_image_request(text):
+        await handle_image_request(update, text)
+        return
+    await answer_text(update, text, action="text")
+
+
+async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.new_chat_members:
+        return
+    bot_id = context.bot.id
+    if any(member.id == bot_id for member in update.message.new_chat_members):
+        record_usage(update, "group_join")
+        await update.message.reply_text(
+            "Salom, men AI yordamchi botman. Guruhda tartibli ishlash uchun meni /ai savol orqali chaqiring. "
+            "Uzbekcha, ruscha va inglizcha javob beraman; 18+ materiallarni tarqatmayman."
+        )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Telegram update failed", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
-            await update.effective_message.reply_text(
-                "Kechirasiz, bot ichida xatolik chiqdi. Iltimos, birozdan keyin yana urinib ko'ring."
-            )
+            await update.effective_message.reply_text("Kechirasiz, bot ichida xatolik chiqdi. Birozdan keyin yana urinib ko'ring.")
         except Exception:
             logger.exception("Error xabarini yuborib bo'lmadi")
 
@@ -1400,19 +968,18 @@ def build_application() -> Application:
     )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("setting", setting_command))
-    application.add_handler(CommandHandler("portal", premium_portal_command))
+    application.add_handler(CommandHandler("payment", payment_command))
+    application.add_handler(CommandHandler("xazina", payment_command))
     application.add_handler(CommandHandler("radar", radar_command))
     application.add_handler(CommandHandler("necha_yulduz", radar_command))
-    application.add_handler(CommandHandler("xazina", payment_command))
-    application.add_handler(CommandHandler("payment", payment_command))
-    application.add_handler(CommandHandler("mantiq_chaqmoq", quiz_command))
-    application.add_handler(CommandHandler("hafta_oynasi", weekly_video_command))
-    application.add_handler(CommandHandler("yt_ol", youtube_command))
-    application.add_handler(CommandHandler("ai", ai_command))
-    application.add_handler(CommandHandler("expense", expense_command))
-    application.add_handler(CommandHandler("month", month_command))
     application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("ai", ai_command))
+    application.add_handler(CommandHandler("image", image_command))
+    application.add_handler(CommandHandler("rasm", image_command))
+    application.add_handler(CommandHandler("media", media_command))
+    application.add_handler(CommandHandler("yt_ol", media_command))
+    application.add_handler(CallbackQueryHandler(media_callback, pattern=r"^media\|"))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, greet_new_members))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error_handler)
@@ -1423,5 +990,5 @@ if __name__ == "__main__":
     require_config()
     analytics = AnalyticsStore(ANALYTICS_DB_FILE)
     app = build_application()
-    logger.info("Bot ishga tushdi.")
+    logger.info("AI bot ishga tushdi.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
