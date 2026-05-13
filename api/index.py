@@ -70,7 +70,7 @@ async def health_check(request: Request) -> dict[str, object]:
         "bot_runtime": "bot.py",
         "base_url": configured_base_url(request),
         "webhook_url": webhook_url_for(request),
-        "next": ["/status", "/ai-health", "/setup-webhook", "/webhook-info"],
+        "next": ["/status", "/ai-health", "/webhook-check", "/setup-webhook", "/webhook-info"],
     }
 
 
@@ -157,6 +157,28 @@ async def webhook_info() -> dict[str, object]:
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:700]}
+
+
+@app.get("/webhook-check")
+async def webhook_check(request: Request) -> dict[str, object]:
+    expected_url = webhook_url_for(request)
+    try:
+        bot = load_bot()
+        application = await bot.get_bot_application()
+        info = await application.bot.get_webhook_info()
+        current_url = info.url
+        return {
+            "ok": current_url == expected_url,
+            "expected_url": expected_url,
+            "current_url": current_url,
+            "needs_setup": current_url != expected_url,
+            "fix_url": f"{configured_base_url(request)}/setup-webhook",
+            "pending_update_count": info.pending_update_count,
+            "last_error_date": info.last_error_date.isoformat() if info.last_error_date else None,
+            "last_error_message": info.last_error_message,
+        }
+    except Exception as exc:
+        return {"ok": False, "expected_url": expected_url, "error": str(exc)[:700]}
 
 
 @app.get("/cron/weekly")
