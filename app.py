@@ -12,6 +12,7 @@ bot_app = None
 bot_lock = asyncio.Lock()
 webhook_lock = asyncio.Lock()
 webhook_ready = False
+bot_init_error = ""
 
 
 def clean_base_url(value: str) -> str:
@@ -55,6 +56,11 @@ async def health_check(request: Request) -> dict[str, object]:
 
 @app.get("/status")
 async def status() -> dict[str, object]:
+    missing_config = []
+    if not telegram_bot.TELEGRAM_BOT_TOKEN:
+        missing_config.append("TELEGRAM_BOT_TOKEN")
+    if not telegram_bot.AI_API_KEY:
+        missing_config.append("GROQ_API_KEY yoki GEMINI_API_KEY yoki OPENAI_API_KEY")
     return {
         "status": "ok",
         "telegram_token": bool(telegram_bot.TELEGRAM_BOT_TOKEN),
@@ -67,6 +73,9 @@ async def status() -> dict[str, object]:
         "media_download": telegram_bot.MEDIA_DOWNLOAD_ENABLED,
         "payment_enabled": telegram_bot.PAYMENT_ENABLED,
         "analytics_db": telegram_bot.ANALYTICS_DB_FILE,
+        "missing_config": missing_config,
+        "bot_initialized": bot_app is not None,
+        "bot_init_error": bot_init_error,
     }
 
 
@@ -91,7 +100,7 @@ async def ai_health() -> dict[str, object]:
 
 
 async def get_bot_application():
-    global bot_app
+    global bot_app, bot_init_error
 
     if bot_app:
         return bot_app
@@ -100,14 +109,19 @@ async def get_bot_application():
         if bot_app:
             return bot_app
 
-        telegram_bot.require_config()
-        telegram_bot.analytics = telegram_bot.AnalyticsStore(telegram_bot.ANALYTICS_DB_FILE)
-        bot_app = telegram_bot.build_application()
-        await bot_app.initialize()
-        await telegram_bot.setup_bot_commands(bot_app)
-        if not bot_app.running:
-            await bot_app.start()
-        return bot_app
+        try:
+            telegram_bot.require_config()
+            telegram_bot.analytics = telegram_bot.AnalyticsStore(telegram_bot.ANALYTICS_DB_FILE)
+            bot_app = telegram_bot.build_application()
+            await bot_app.initialize()
+            await telegram_bot.setup_bot_commands(bot_app)
+            if not bot_app.running:
+                await bot_app.start()
+            bot_init_error = ""
+            return bot_app
+        except Exception as exc:
+            bot_init_error = str(exc)[:700]
+            raise
 
 
 async def ensure_webhook(request: Request | None = None, explicit_url: str | None = None) -> dict[str, object]:
@@ -127,7 +141,15 @@ async def ensure_webhook(request: Request | None = None, explicit_url: str | Non
 
 @app.get("/setup-webhook")
 async def setup_webhook(request: Request, url: str | None = None) -> dict[str, object]:
-    return await ensure_webhook(request, url)
+    try:
+        return await ensure_webhook(request, url)
+    except Exception as exc:
+        telegram_bot.logger.exception("Webhook setup failed")
+        return {
+            "ok": False,
+            "error": str(exc)[:700],
+            "hint": "Vercel Environment Variables ichida TELEGRAM_BOT_TOKEN va AI key nomlarini tekshiring.",
+        }
 
 
 @app.get("/auto-webhook")
@@ -137,14 +159,19 @@ async def auto_webhook(request: Request) -> dict[str, object]:
 
 @app.get("/webhook-info")
 async def webhook_info() -> dict[str, object]:
-    application = await get_bot_application()
-    info = await application.bot.get_webhook_info()
-    return {
-        "url": info.url,
-        "pending_update_count": info.pending_update_count,
-        "last_error_date": info.last_error_date.isoformat() if info.last_error_date else None,
-        "last_error_message": info.last_error_message,
-    }
+    try:
+        application = await get_bot_application()
+        info = await application.bot.get_webhook_info()
+        return {
+            "ok": True,
+            "url": info.url,
+            "pending_update_count": info.pending_update_count,
+            "last_error_date": info.last_error_date.isoformat() if info.last_error_date else None,
+            "last_error_message": info.last_error_message,
+        }
+    except Exception as exc:
+        telegram_bot.logger.exception("Webhook info failed")
+        return {"ok": False, "error": str(exc)[:700]}
 
 
 @app.get("/cron/weekly")

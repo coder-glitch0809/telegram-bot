@@ -29,7 +29,7 @@ from telegram.ext import (
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_token", "")).strip()
 GROK_API_KEY = os.getenv("GROK_API_KEY", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -131,7 +131,7 @@ MEDIA_DOWNLOAD_ENABLED = os.getenv("MEDIA_DOWNLOAD_ENABLED", os.getenv("YOUTUBE_
 MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", os.getenv("YOUTUBE_MAX_MB", "45")) or 45)
 ANALYTICS_DB_FILE = os.getenv(
     "ANALYTICS_DB_FILE",
-    "/tmp/bot_analytics.sqlite3" if os.getenv("VERCEL") else "bot_analytics.sqlite3",
+    "/tmp/bot_analytics.sqlite3" if os.getenv("VERCEL") or os.getenv("VERCEL_URL") else "bot_analytics.sqlite3",
 ).strip()
 
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
