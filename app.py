@@ -1,1 +1,1 @@
-from bot import app
+from api.index import app
