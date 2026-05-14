@@ -9,3 +9,4 @@ __pycache__/
 *.pyc
 ai-image-*/
 media-*/
+bot-run*.log
