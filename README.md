@@ -54,6 +54,30 @@ REPORT_WEEKLY_DAY=0
 
 Rasm generatsiyasi OpenAI Images API orqali ishlaydi, shuning uchun `OPENAI_API_KEY` alohida kerak. Matn AI uchun Groq/Gemini/xAI/OpenAI ishlatishingiz mumkin.
 
+Provider tanlashda key nomi mos bo'lishi kerak:
+
+```env
+AI_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+
+AI_PROVIDER=gemini
+GEMINI_API_KEY=AIza...
+
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+
+AI_PROVIDER=xai
+GROK_API_KEY=xai-...
+```
+
+Excel uchun ro'yxat kerak bo'lsa, botga shunday yozing:
+
+```text
+Telefonlar ro'yxatini Excel uchun jadval qilib ber: nomi, narxi, izoh
+```
+
+Bot bunday so'rovda Excelga ko'chirish qulay bo'lgan tab bilan ajratilgan jadval qaytaradi.
+
 ## Ishga Tushirish
 
 ```powershell

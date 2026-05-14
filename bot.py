@@ -51,7 +51,8 @@ if not GEMINI_API_KEY and GROQ_API_KEY.startswith("AIzaSy"):
 AI_PROVIDER_ENV = os.getenv("AI_PROVIDER", "").strip().lower()
 if AI_PROVIDER_ENV == "grok":
     AI_PROVIDER_ENV = "xai"
-if AI_PROVIDER_ENV:
+SUPPORTED_AI_PROVIDERS = {"gemini", "groq", "xai", "openai"}
+if AI_PROVIDER_ENV in SUPPORTED_AI_PROVIDERS:
     AI_PROVIDER = AI_PROVIDER_ENV
 elif GEMINI_API_KEY:
     AI_PROVIDER = "gemini"
@@ -63,10 +64,10 @@ else:
     AI_PROVIDER = "openai"
 
 AI_API_KEY = {
-    "gemini": GEMINI_API_KEY or OPENAI_API_KEY,
-    "xai": GROK_API_KEY or OPENAI_API_KEY,
-    "groq": GROQ_API_KEY or OPENAI_API_KEY,
-    "openai": OPENAI_API_KEY or GROQ_API_KEY,
+    "gemini": GEMINI_API_KEY,
+    "xai": GROK_API_KEY,
+    "groq": GROQ_API_KEY,
+    "openai": OPENAI_API_KEY,
 }.get(AI_PROVIDER, OPENAI_API_KEY or GEMINI_API_KEY)
 
 DEFAULT_AI_BASE_URL = {
@@ -168,6 +169,10 @@ URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 MEDIA_URL_RE = re.compile(
     r"^https?://(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com|instagram\.com|instagr\.am)/\S+$",
+    re.IGNORECASE,
+)
+EXCEL_LIST_RE = re.compile(
+    r"\b(excel|xlsx|csv|tsv|jadval|table|spreadsheet|spisok|spiska|ro'yxat|royxat|list)\b",
     re.IGNORECASE,
 )
 IMAGE_WORDS = {"rasm", "surat", "image", "picture", "нарисуй", "изображение", "сгенерируй"}
@@ -584,6 +589,10 @@ def looks_like_image_request(text: str) -> bool:
     return any(word in lowered for word in IMAGE_WORDS)
 
 
+def looks_like_excel_list_request(text: str) -> bool:
+    return bool(EXCEL_LIST_RE.search(text))
+
+
 def is_transient_ai_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return any(
@@ -609,7 +618,16 @@ def friendly_error(exc: Exception) -> str:
     message = ANSI_RE.sub("", str(exc))
     lowered = message.lower()
     if "invalid_api_key" in lowered or "invalid api key" in lowered or "401" in message:
-        return "AI API key noto'g'ri yoki ishlamayapti. .env ichidagi provider va API keyni yangilang, keyin botni qayta ishga tushiring."
+        expected_key = {
+            "gemini": "GEMINI_API_KEY",
+            "groq": "GROQ_API_KEY",
+            "xai": "GROK_API_KEY",
+            "openai": "OPENAI_API_KEY",
+        }.get(AI_PROVIDER, "AI API key")
+        return (
+            f"AI API key noto'g'ri yoki providerga mos emas. Hozirgi provider: {AI_PROVIDER}. "
+            f".env ichida {expected_key} ni yangilang, AI_BASE_URL ni providerga mos qiling va botni qayta ishga tushiring."
+        )
     if "requested format is not available" in lowered:
         return "Bu media uchun so'ralgan format topilmadi. Boshqa formatni tanlab ko'ring."
     if "video unavailable" in lowered:
@@ -628,6 +646,10 @@ def friendly_error(exc: Exception) -> str:
 
 
 async def ask_ai(text: str) -> str:
+    if not AI_API_KEY:
+        raise RuntimeError(f"{AI_PROVIDER.upper()} uchun API key topilmadi. .env ichidagi AI_PROVIDER va mos API keyni tekshiring.")
+
+    excel_mode = looks_like_excel_list_request(text)
     emoji_guide = (
         f"Bot/yordamchi mavzusi: {custom_emoji_html(BOT_EMOJI, BOT_CUSTOM_EMOJI_ID)}; "
         f"ogohlantirish/xavf: {custom_emoji_html(WARNING_EMOJI, WARNING_CUSTOM_EMOJI_ID)}; "
@@ -655,6 +677,13 @@ async def ask_ai(text: str) -> str:
                             "18+ pornografik, jinsiy ekspluatatsiya yoki noqonuniy materiallarni yaratmang, topmang va tarqatmang. "
                             "Bunday so'rovda qisqa rad etib, xavfsiz alternativ taklif qiling. "
                             "HTML taglarni doim to'g'ri yoping va javobni Telegramda o'qishga qulay qiling."
+                            + (
+                                " Agar foydalanuvchi Excel, CSV, jadval, ro'yxat, spisok yoki spreadsheet uchun format so'rasa, "
+                                "javobni faqat <pre> ichida tab bilan ajratilgan TSV jadval ko'rinishida yozing. "
+                                "Birinchi qatorda ustun nomlari bo'lsin. Emoji, markdown, ortiqcha izoh va HTML tag ishlatmang; faqat bitta <pre>...</pre> blok qaytaring."
+                                if excel_mode
+                                else ""
+                            )
                         ),
                     },
                     {"role": "user", "content": text},
