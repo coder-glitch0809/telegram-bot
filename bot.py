@@ -608,6 +608,8 @@ def ai_call_with_retries(callable_obj, retries: int = 3, initial_delay: float = 
 def friendly_error(exc: Exception) -> str:
     message = ANSI_RE.sub("", str(exc))
     lowered = message.lower()
+    if "invalid_api_key" in lowered or "invalid api key" in lowered or "401" in message:
+        return "AI API key noto'g'ri yoki ishlamayapti. .env ichidagi provider va API keyni yangilang, keyin botni qayta ishga tushiring."
     if "requested format is not available" in lowered:
         return "Bu media uchun so'ralgan format topilmadi. Boshqa formatni tanlab ko'ring."
     if "video unavailable" in lowered:
