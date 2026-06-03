@@ -5,10 +5,11 @@ Bu loyiha Telegram ichida to'liq AI yordamchi bot sifatida ishlaydi:
 - uzbekcha, ruscha va inglizcha savol-javob;
 - privat chatda matn va voice orqali AI javob;
 - guruhlarda faqat `/ai` komandasi orqali AI javob;
-- AI rasm generatsiyasi, har foydalanuvchiga 10 ta bepul;
+- AI rasm generatsiyasi ochiq rejimda;
+- o'qituvchi, o'quvchi va studentlar uchun konspekt, test, dars reja va prezentatsiya fayllari;
 - Instagram va YouTube linklaridan audio yoki video tanlash;
 - 18+ materiallarni rad etish;
-- bot egasiga haftalik foydalanuvchi va top so'rovlar hisoboti.
+- bot egasiga yangi foydalanuvchi xabari va haftalik foydalanuvchi/top so'rovlar hisoboti.
 
 ## Kalitlar
 
@@ -27,19 +28,13 @@ OPENAI_TEXT_MODEL=llama-3.3-70b-versatile
 OPENAI_TRANSCRIBE_MODEL=whisper-large-v3
 
 OPENAI_API_KEY=PASTE_OPENAI_KEY_HERE
+OPENAI_IMAGE_API_KEY=PASTE_OPENAI_IMAGE_KEY_HERE
 IMAGE_GENERATION_ENABLED=true
 IMAGE_MODEL=gpt-image-1
 IMAGE_SIZE=1024x1024
-IMAGE_FREE_LIMIT=10
 
 MEDIA_DOWNLOAD_ENABLED=true
 MEDIA_MAX_MB=45
-
-PAYMENT_ENABLED=true
-PAYMENT_PROVIDER=manual
-PAYMENT_OWNER_CONTACT=@username_yoki_telefon
-PAYMENT_PLANS=pro:49000:10 tadan keyingi rasm generatsiyasi;business:149000:Jamoa va kanal uchun
-PREMIUM_USER_IDS=
 
 OWNER_EMAIL=your_gmail@gmail.com
 SMTP_HOST=smtp.gmail.com
@@ -52,7 +47,7 @@ REPORT_WEEKLY_DAY=0
 
 `OWNER_EMAIL` va `SMTP_USERNAME` joyiga Gmail manzilingiz yoziladi. Gmail uchun oddiy parol emas, Google App Password ishlating.
 
-Rasm generatsiyasi OpenAI Images API orqali ishlaydi, shuning uchun `OPENAI_API_KEY` alohida kerak. Matn AI uchun Groq/Gemini/xAI/OpenAI ishlatishingiz mumkin.
+Rasm generatsiyasi OpenAI Images API orqali ishlaydi. Rasm uchun `OPENAI_IMAGE_API_KEY` ishlatiladi; bo'sh bo'lsa `OPENAI_API_KEY` fallback bo'ladi. Matn va voice AI uchun Groq yoki OpenAI ishlatishingiz mumkin.
 
 Provider tanlashda key nomi mos bo'lishi kerak:
 
@@ -60,14 +55,8 @@ Provider tanlashda key nomi mos bo'lishi kerak:
 AI_PROVIDER=groq
 GROQ_API_KEY=gsk_...
 
-AI_PROVIDER=gemini
-GEMINI_API_KEY=AIza...
-
 AI_PROVIDER=openai
 OPENAI_API_KEY=sk-...
-
-AI_PROVIDER=xai
-GROK_API_KEY=xai-...
 ```
 
 Excel uchun ro'yxat kerak bo'lsa, botga shunday yozing:
@@ -127,11 +116,12 @@ Tekshirish endpointlari:
 /ai savol
 /image rasm prompti
 /rasm rasm prompti
+/present mavzu pptx
+/prezentatsiya mavzu docx
 /media audio LINK
 /media video LINK
 /yt_ol audio LINK
 /yt_ol video LINK
-/payment
 /radar
 /report
 ```

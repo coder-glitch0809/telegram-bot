@@ -9,6 +9,7 @@ import smtplib
 import sqlite3
 import tempfile
 import time
+import uuid
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -41,60 +42,33 @@ except ImportError:
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_token", "")).strip()
-GROK_API_KEY = os.getenv("GROK_API_KEY", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-
-if GROK_API_KEY.startswith("gsk_") and not GROQ_API_KEY:
-    GROQ_API_KEY = GROK_API_KEY
-    GROK_API_KEY = ""
-if GROQ_API_KEY.startswith("xai-") and not GROK_API_KEY:
-    GROK_API_KEY = GROQ_API_KEY
-    GROQ_API_KEY = ""
-if not GEMINI_API_KEY and GROQ_API_KEY.startswith("AIzaSy"):
-    GEMINI_API_KEY = GROQ_API_KEY
+OPENAI_IMAGE_API_KEY = os.getenv("OPENAI_IMAGE_API_KEY", OPENAI_API_KEY).strip()
 
 AI_PROVIDER_ENV = os.getenv("AI_PROVIDER", "").strip().lower()
-if AI_PROVIDER_ENV == "grok":
-    AI_PROVIDER_ENV = "xai"
-SUPPORTED_AI_PROVIDERS = {"gemini", "groq", "xai", "openai"}
+SUPPORTED_AI_PROVIDERS = {"groq", "openai"}
 if AI_PROVIDER_ENV in SUPPORTED_AI_PROVIDERS:
     AI_PROVIDER = AI_PROVIDER_ENV
-elif GEMINI_API_KEY:
-    AI_PROVIDER = "gemini"
-elif GROQ_API_KEY and not GROQ_API_KEY.startswith("AIzaSy"):
+elif GROQ_API_KEY:
     AI_PROVIDER = "groq"
-elif GROK_API_KEY:
-    AI_PROVIDER = "xai"
 else:
     AI_PROVIDER = "openai"
 
 AI_API_KEY = {
-    "gemini": GEMINI_API_KEY,
-    "xai": GROK_API_KEY,
     "groq": GROQ_API_KEY,
     "openai": OPENAI_API_KEY,
-}.get(AI_PROVIDER, OPENAI_API_KEY or GEMINI_API_KEY)
+}.get(AI_PROVIDER, OPENAI_API_KEY)
 
 DEFAULT_AI_BASE_URL = {
-    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
-    "xai": "https://api.x.ai/v1",
     "groq": "https://api.groq.com/openai/v1",
     "openai": "",
 }.get(AI_PROVIDER, "")
 AI_BASE_URL = os.getenv("AI_BASE_URL", DEFAULT_AI_BASE_URL).strip()
-if AI_PROVIDER == "gemini" and AI_BASE_URL.rstrip("/") in {
-    "https://generativelanguage.googleapis.com/v1beta",
-    "https://generativelanguage.googleapis.com/v1beta/openai",
-}:
-    AI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 if AI_PROVIDER == "groq" and AI_BASE_URL.rstrip("/") in {"https://api.groq.com/v1", "https://api.groq.com/v1/models"}:
     AI_BASE_URL = "https://api.groq.com/openai/v1"
 
 DEFAULT_TEXT_MODEL = {
-    "gemini": "gemini-2.0-flash",
-    "xai": "grok-4.20-reasoning",
     "groq": "llama-3.3-70b-versatile",
     "openai": "gpt-4o-mini",
 }.get(AI_PROVIDER, "gpt-4o-mini")
@@ -102,8 +76,6 @@ OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", DEFAULT_TEXT_MODEL).strip()
 DEFAULT_TRANSCRIBE_MODEL = {
     "groq": "whisper-large-v3",
     "openai": "gpt-4o-mini-transcribe",
-    "gemini": OPENAI_TEXT_MODEL,
-    "xai": "gpt-4o-mini-transcribe",
 }.get(AI_PROVIDER, "gpt-4o-mini-transcribe")
 OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", DEFAULT_TRANSCRIBE_MODEL).strip()
 
@@ -116,21 +88,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", SMTP_USERNAME).strip()
 REPORT_WEEKLY_DAY = int(os.getenv("REPORT_WEEKLY_DAY", "0") or 0)
 
-PAYMENT_ENABLED = os.getenv("PAYMENT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "ha"}
-PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "manual").strip()
-PAYMENT_OWNER_CONTACT = os.getenv("PAYMENT_OWNER_CONTACT", "@admin").strip()
-PAYMENT_PLANS = os.getenv(
-    "PAYMENT_PLANS",
-    "pro:49000:10 tadan keyingi rasm generatsiyasi;business:149000:Jamoa va kanal uchun",
-).strip()
-PREMIUM_USER_IDS = {
-    int(user_id)
-    for user_id in os.getenv("PREMIUM_USER_IDS", "").replace(" ", "").split(",")
-    if user_id
-}
-
 IMAGE_GENERATION_ENABLED = os.getenv("IMAGE_GENERATION_ENABLED", "true").strip().lower() in {"1", "true", "yes", "ha"}
-IMAGE_FREE_LIMIT = int(os.getenv("IMAGE_FREE_LIMIT", "10") or 10)
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1").strip()
 IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024").strip()
 START_EMOJI = "\U0001F44B"
@@ -151,8 +109,6 @@ CHAT_EMOJI = "\U0001F4AC"
 CHAT_CUSTOM_EMOJI_ID = "5443038326535759644"
 SEARCH_EMOJI = "\U0001F50E"
 SEARCH_CUSTOM_EMOJI_ID = "5188311512791393083"
-PREMIUM_EMOJI = "\U0001F451"
-PREMIUM_CUSTOM_EMOJI_ID = "6215092654003195416"
 WAIT_EMOJI = "\u267e\ufe0f"
 WAIT_CUSTOM_EMOJI_ID = "5389019921558563669"
 
@@ -171,9 +127,16 @@ DEFAULT_ANALYTICS_DB_FILE = (
 ANALYTICS_DB_FILE = os.getenv("ANALYTICS_DB_FILE", DEFAULT_ANALYTICS_DB_FILE).strip()
 if os.getenv("VERCEL") or os.getenv("VERCEL_URL"):
     ANALYTICS_DB_FILE = str(Path(tempfile.gettempdir()) / "bot_analytics.sqlite3")
+DEFAULT_TEMP_OUTPUT_DIR = (
+    str(Path(tempfile.gettempdir()))
+    if os.getenv("VERCEL") or os.getenv("VERCEL_URL")
+    else ".bot-temp"
+)
+TEMP_OUTPUT_DIR = os.getenv("BOT_TEMP_DIR", DEFAULT_TEMP_OUTPUT_DIR).strip()
 
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+HTML_TAG_RE = re.compile(r"<[^>]+>")
 MEDIA_URL_RE = re.compile(
     r"^https?://(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com|instagram\.com|instagr\.am)/\S+$",
     re.IGNORECASE,
@@ -183,6 +146,19 @@ EXCEL_LIST_RE = re.compile(
     re.IGNORECASE,
 )
 IMAGE_WORDS = {"rasm", "surat", "image", "picture", "нарисуй", "изображение", "сгенерируй"}
+PRESENTATION_WORDS = {
+    "present",
+    "presentation",
+    "prezentatsiya",
+    "презентация",
+    "slayd",
+    "slide",
+    "ppt",
+    "pptx",
+    "dars ishlanma",
+    "konspekt",
+    "referat",
+}
 ADULT_WORDS = {
     "18+",
     "porn",
@@ -216,7 +192,7 @@ if set_default_openai_client and set_default_openai_api and set_tracing_disabled
     set_default_openai_client(agents_client, use_for_tracing=False)
     set_default_openai_api("chat_completions")
     set_tracing_disabled(True)
-image_client = OpenAI(api_key=OPENAI_API_KEY or AI_API_KEY or "missing")
+image_client = OpenAI(api_key=OPENAI_IMAGE_API_KEY or "missing")
 analytics: "AnalyticsStore | None" = None
 bot_app: "Application | None" = None
 bot_lock = asyncio.Lock()
@@ -344,6 +320,11 @@ class AnalyticsStore:
             row = connection.execute("SELECT image_count FROM users WHERE user_id = ?", (user_id,)).fetchone()
         return int(row["image_count"] or 0) if row else 0
 
+    def user_exists(self, user_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return row is not None
+
     def has_sent_report(self, report_key: str) -> bool:
         with self._connect() as connection:
             row = connection.execute("SELECT 1 FROM sent_reports WHERE report_key = ?", (report_key,)).fetchone()
@@ -451,7 +432,7 @@ def require_config() -> None:
     if not TELEGRAM_BOT_TOKEN:
         missing.append("TELEGRAM_BOT_TOKEN")
     if not AI_API_KEY:
-        missing.append("GEMINI_API_KEY yoki GROQ_API_KEY yoki OPENAI_API_KEY")
+        missing.append("GROQ_API_KEY yoki OPENAI_API_KEY")
     if missing:
         raise RuntimeError(f"Sozlanmagan yoki topilmadi: {', '.join(missing)}. .env faylini ko'ring.")
 
@@ -465,32 +446,6 @@ def get_analytics() -> AnalyticsStore:
 
 def is_owner(user_id: int) -> bool:
     return OWNER_TELEGRAM_ID != 0 and user_id == OWNER_TELEGRAM_ID
-
-
-def has_premium_access(user_id: int) -> bool:
-    return is_owner(user_id) or user_id in PREMIUM_USER_IDS
-
-
-def parse_payment_plans() -> list[tuple[str, str, str]]:
-    plans = []
-    for raw_plan in PAYMENT_PLANS.split(";"):
-        parts = [part.strip() for part in raw_plan.split(":", 2)]
-        if len(parts) == 3 and parts[0]:
-            plans.append((parts[0], parts[1], parts[2]))
-    return plans
-
-
-def payment_status_text() -> str:
-    lines = ["Pullik tizim:", "Savol-javob cheksiz. Rasm generatsiyasi 10 ta bepul."]
-    lines.append("Sizda Pro ochiq." if PAYMENT_ENABLED else "To'lov rejimi test holatida.")
-    lines.extend(["", "Rejalar:"])
-    for name, price, description in parse_payment_plans():
-        price_text = "bepul" if price == "0" else f"{price} UZS"
-        lines.append(f"- {name}: {price_text} - {description}")
-    lines.append(f"Provider: {PAYMENT_PROVIDER}")
-    if PAYMENT_OWNER_CONTACT:
-        lines.append(f"Aloqa: {PAYMENT_OWNER_CONTACT}")
-    return "\n".join(lines)
 
 
 def email_reports_enabled() -> bool:
@@ -563,8 +518,8 @@ async def setup_bot_commands(application: Application) -> None:
             BotCommand("start", "Botni boshlash"),
             BotCommand("ai", "Guruhda yoki privatda AI savol"),
             BotCommand("image", "AI rasm generatsiyasi"),
+            BotCommand("present", "Prezentatsiya yoki o'quv fayli"),
             BotCommand("media", "Instagram/YouTube audio yoki video"),
-            BotCommand("payment", "Rasm limiti va Pro rejalar"),
             BotCommand("radar", "Foydalanuvchilar va trendlar"),
             BotCommand("report", "Admin haftalik hisobot"),
             BotCommand("help", "Yordam"),
@@ -584,6 +539,19 @@ def require_message(update: Update) -> Any:
     if message is None:
         raise RuntimeError("Telegram update ichida xabar topilmadi.")
     return message
+
+
+def make_temp_dir(prefix: str) -> Path:
+    base_dir = Path(TEMP_OUTPUT_DIR)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    for _ in range(10):
+        path = base_dir / f"{prefix}{uuid.uuid4().hex[:10]}"
+        try:
+            path.mkdir(parents=True, exist_ok=False)
+            return path
+        except FileExistsError:
+            continue
+    raise RuntimeError("Vaqtinchalik papka yaratib bo'lmadi.")
 
 
 def context_args(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
@@ -620,6 +588,11 @@ def looks_like_image_request(text: str) -> bool:
     return any(word in lowered for word in IMAGE_WORDS)
 
 
+def looks_like_presentation_request(text: str) -> bool:
+    lowered = text.lower()
+    return any(word in lowered for word in PRESENTATION_WORDS)
+
+
 def looks_like_excel_list_request(text: str) -> bool:
     return bool(EXCEL_LIST_RE.search(text))
 
@@ -650,9 +623,7 @@ def friendly_error(exc: Exception) -> str:
     lowered = message.lower()
     if "invalid_api_key" in lowered or "invalid api key" in lowered or "401" in message:
         expected_key = {
-            "gemini": "GEMINI_API_KEY",
             "groq": "GROQ_API_KEY",
-            "xai": "GROK_API_KEY",
             "openai": "OPENAI_API_KEY",
         }.get(AI_PROVIDER, "AI API key")
         return (
@@ -685,13 +656,16 @@ def build_chat_instructions(text: str) -> str:
         f"rasm/kamera: {custom_emoji_html(PHOTO_EMOJI, PHOTO_CUSTOM_EMOJI_ID)}; "
         f"savol-javob/chat: {custom_emoji_html(CHAT_EMOJI, CHAT_CUSTOM_EMOJI_ID)}; "
         f"qidirish/tahlil: {custom_emoji_html(SEARCH_EMOJI, SEARCH_CUSTOM_EMOJI_ID)}; "
-        f"premium/pro: {custom_emoji_html(PREMIUM_EMOJI, PREMIUM_CUSTOM_EMOJI_ID)}; "
         f"kutish/jarayon: {custom_emoji_html(WAIT_EMOJI, WAIT_CUSTOM_EMOJI_ID)}."
     )
     return (
         "Siz Telegram ichidagi zamonaviy AI yordamchisiz. "
         "Asosan o'zbekcha, ruscha va inglizcha muloqot qiling; foydalanuvchi qaysi tilda yozsa, shu tilda javob bering. "
         "Javoblar aniq, foydali, tabiiy va qisqa bo'lsin. "
+        "Siz maktab o'qituvchilari, repetitorlar, talabalar va o'quvchilarga dars reja, konspekt, test, izoh, "
+        "misol, uy vazifasi uchun yo'nalish, prezentatsiya matni, jadval va o'quv materiallarini tayyorlashda yordam berasiz. "
+        "O'quvchiga tayyor ko'chirma emas, tushunarli bosqichma-bosqich yechim va o'rganishga yordam beradigan izoh bering. "
+        "Ustozlar uchun dars maqsadi, metod, vaqt taqsimoti, baholash mezoni va topshiriqlarni tartibli tuzing. "
         "Javobni Telegram HTML formatida yozing: faqat <b>, <i>, <code>, <pre> va <tg-emoji> taglaridan foydalaning. "
         "Markdown belgilarini ishlatmang. Mavzuga mos 1-4 ta animated emoji qo'shing, lekin ortiqcha bezamang. "
         f"Faqat shu custom emoji taglaridan foydalaning: {emoji_guide} "
@@ -743,27 +717,9 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if voice is None:
         raise RuntimeError("Ovozli xabar topilmadi.")
     telegram_file = await context.bot.get_file(voice.file_id)
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    with tempfile.TemporaryDirectory(dir=str(make_temp_dir("voice-parent-"))) as tmp_dir:
         audio_path = Path(tmp_dir) / "voice.ogg"
         await telegram_file.download_to_drive(custom_path=str(audio_path))
-        if AI_PROVIDER == "gemini":
-            audio_b64 = base64.b64encode(audio_path.read_bytes()).decode()
-            payload = {
-                "contents": [
-                    {
-                        "parts": [
-                            {"inline_data": {"mime_type": "audio/ogg", "data": audio_b64}},
-                            {"text": "Ushbu ovozni matnga aylantir. Faqat matnni yoz."},
-                        ]
-                    }
-                ]
-            }
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{OPENAI_TEXT_MODEL}:generateContent?key={AI_API_KEY}"
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                result = resp.json()
-            return result["candidates"][0]["content"]["parts"][0]["text"].strip()
         with audio_path.open("rb") as audio_file:
             transcription = cast(Any, await asyncio.to_thread(
                 lambda: ai_call_with_retries(
@@ -776,8 +732,8 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def generate_image(prompt: str) -> Path:
     if not IMAGE_GENERATION_ENABLED:
         raise RuntimeError("Rasm generatsiyasi hozir o'chirilgan.")
-    if not OPENAI_API_KEY:
-        raise RuntimeError("Rasm generatsiyasi uchun OPENAI_API_KEY kerak.")
+    if not OPENAI_IMAGE_API_KEY:
+        raise RuntimeError("Rasm generatsiyasi uchun OPENAI_IMAGE_API_KEY kerak.")
     if contains_adult_content(prompt):
         raise ValueError("18+ yoki pornografik rasm so'rovlari qo'llab-quvvatlanmaydi.")
     response = await asyncio.to_thread(
@@ -794,7 +750,7 @@ async def generate_image(prompt: str) -> Path:
     if not response.data:
         raise RuntimeError("AI rasm qaytarmadi.")
     image_data = response.data[0]
-    output_path = Path(tempfile.mkdtemp(prefix="ai-image-")) / "image.png"
+    output_path = make_temp_dir("ai-image-") / "image.png"
     if getattr(image_data, "b64_json", None):
         output_path.write_bytes(base64.b64decode(str(image_data.b64_json)))
         return output_path
@@ -810,14 +766,7 @@ async def generate_image(prompt: str) -> Path:
 
 def image_limit_text(user_id: int) -> str:
     used = get_analytics().user_image_count(user_id)
-    if has_premium_access(user_id):
-        return f"Pro status: rasm generatsiyasi ochiq. Ishlatilgan: {used}."
-    left = max(IMAGE_FREE_LIMIT - used, 0)
-    return f"Bepul rasm limiti: {used}/{IMAGE_FREE_LIMIT}. Qoldi: {left}."
-
-
-def image_payment_required_text() -> str:
-    return "10 ta bepul rasm limiti tugadi.\n\n" + payment_status_text()
+    return f"Rasm generatsiyasi hozir ochiq. Ishlatilgan: {used}."
 
 
 def download_media(url: str, media_type: str) -> tuple[Path, str, int | None]:
@@ -827,7 +776,7 @@ def download_media(url: str, media_type: str) -> tuple[Path, str, int | None]:
     except ImportError as exc:
         raise RuntimeError("yt-dlp o'rnatilmagan. requirements.txt yangilang va deployni qayta qiling.") from exc
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="media-"))
+    tmp_dir = make_temp_dir("media-")
     output_template = str(tmp_dir / "%(title).80s-%(id)s.%(ext)s")
     has_ffmpeg = shutil.which("ffmpeg") is not None
     options: dict[str, Any] = {
@@ -942,15 +891,184 @@ async def reply_html_or_plain(message: Any, text: str) -> None:
         await message.reply_text(text[:4096])
 
 
+def plain_text(value: str) -> str:
+    value = HTML_TAG_RE.sub("", value)
+    return html.unescape(value).strip()
+
+
+def requested_document_format(text: str) -> str:
+    lowered = text.lower()
+    for extension in ("pptx", "docx", "html", "md", "txt"):
+        if extension in lowered:
+            return extension
+    if "powerpoint" in lowered or "prezentatsiya" in lowered or "презентация" in lowered or "slayd" in lowered:
+        return "pptx"
+    if "word" in lowered or "referat" in lowered or "konspekt" in lowered:
+        return "docx"
+    return "pptx"
+
+
+def safe_filename(title: str, extension: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9А-Яа-яЁёЎўҚқҒғҲҳІіЇїЄє _.-]+", "", title).strip()
+    cleaned = re.sub(r"\s+", "_", cleaned)[:60] or "ai_material"
+    return f"{cleaned}.{extension}"
+
+
+def parse_slide_outline(text: str) -> tuple[str, list[tuple[str, list[str]]]]:
+    lines = [plain_text(line).strip(" -•\t") for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    title = lines[0].replace("TITLE:", "").replace("MAVZU:", "").strip() if lines else "AI prezentatsiya"
+    slides: list[tuple[str, list[str]]] = []
+    current_title = ""
+    current_items: list[str] = []
+    for line in lines[1:]:
+        normalized = line.lower()
+        if normalized.startswith(("slide:", "slayd:", "слайд:")) or re.match(r"^\d+[.)]\s+", line):
+            if current_title:
+                slides.append((current_title, current_items[:5]))
+            current_title = re.sub(r"^(slide|slayd|слайд):\s*", "", line, flags=re.IGNORECASE)
+            current_title = re.sub(r"^\d+[.)]\s*", "", current_title).strip()
+            current_items = []
+        elif current_title:
+            current_items.append(line)
+    if current_title:
+        slides.append((current_title, current_items[:5]))
+    if not slides:
+        chunks = lines[1:] or [title]
+        for index in range(0, min(len(chunks), 30), 5):
+            slides.append((f"Bo'lim {index // 5 + 1}", chunks[index : index + 5]))
+    return title, slides[:10]
+
+
+async def build_learning_material(topic: str) -> str:
+    prompt = (
+        "Quyidagi mavzu uchun maktab o'qituvchisi va o'quvchilariga mos, tayyor faylga aylantiriladigan "
+        "prezentatsiya/o'quv materiali tuz. Faqat oddiy matn qaytar: birinchi qatorda TITLE: mavzu, keyin "
+        "8 tagacha SLIDE: sarlavha va har bir slayd ostida 3-5 ta qisqa punkt. Oxirida 5 ta test savoli va "
+        f"uyga vazifa qo'sh. Mavzu: {topic}"
+    )
+    return plain_text(await ask_ai(prompt))
+
+
+def write_text_material(path: Path, title: str, slides: list[tuple[str, list[str]]], extension: str) -> None:
+    if extension == "html":
+        body = [f"<h1>{html.escape(title)}</h1>"]
+        for slide_title, items in slides:
+            body.append(f"<h2>{html.escape(slide_title)}</h2><ul>")
+            body.extend(f"<li>{html.escape(item)}</li>" for item in items)
+            body.append("</ul>")
+        path.write_text("<!doctype html><meta charset='utf-8'>" + "\n".join(body), encoding="utf-8")
+        return
+    prefix = "#" if extension == "md" else ""
+    lines = [f"{prefix} {title}".strip(), ""]
+    for slide_title, items in slides:
+        lines.extend([f"{prefix * 2} {slide_title}".strip(), ""])
+        lines.extend(f"- {item}" for item in items)
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_docx_material(path: Path, title: str, slides: list[tuple[str, list[str]]]) -> None:
+    from docx import Document
+
+    document = Document()
+    document.add_heading(title, level=1)
+    for slide_title, items in slides:
+        document.add_heading(slide_title, level=2)
+        for item in items:
+            document.add_paragraph(item, style="List Bullet")
+    document.save(str(path))
+
+
+def write_pptx_material(path: Path, title: str, slides: list[tuple[str, list[str]]]) -> None:
+    from pptx import Presentation
+
+    presentation = Presentation()
+    title_slide = presentation.slides.add_slide(presentation.slide_layouts[0])
+    title_shape = cast(Any, title_slide.shapes.title)
+    title_shape.text = title
+    cast(Any, title_slide.placeholders[1]).text = "AI yordamida tayyorlandi"
+    for slide_title, items in slides:
+        slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+        cast(Any, slide.shapes.title).text = slide_title
+        body = cast(Any, slide.shapes.placeholders[1]).text_frame
+        body.clear()
+        for index, item in enumerate(items or ["Asosiy fikrlarni o'qituvchi izohi bilan to'ldiring."]):
+            paragraph = body.paragraphs[0] if index == 0 else body.add_paragraph()
+            paragraph.text = item
+            paragraph.level = 0
+    presentation.save(str(path))
+
+
+def create_learning_file(topic: str, material: str, extension: str) -> Path:
+    title, slides = parse_slide_outline(material)
+    tmp_dir = make_temp_dir("ai-material-")
+    path = tmp_dir / safe_filename(title or topic, extension)
+    try:
+        if extension == "pptx":
+            write_pptx_material(path, title, slides)
+        elif extension == "docx":
+            write_docx_material(path, title, slides)
+        else:
+            write_text_material(path, title, slides, extension)
+    except Exception:
+        path = tmp_dir / safe_filename(title or topic, "md")
+        write_text_material(path, title, slides, "md")
+    return path
+
+
+async def send_learning_material(update: Update, topic: str) -> None:
+    message = require_message(update)
+    extension = requested_document_format(topic)
+    await message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+    try:
+        material = await build_learning_material(topic)
+        file_path = create_learning_file(topic, material, extension)
+        with file_path.open("rb") as document_file:
+            await message.reply_document(
+                document=document_file,
+                filename=file_path.name,
+                caption="<b>O'quv materiali tayyor</b>",
+                parse_mode=ParseMode.HTML,
+                read_timeout=60,
+                write_timeout=60,
+                connect_timeout=20,
+                pool_timeout=20,
+            )
+        record_usage(update, "presentation", text_preview=topic)
+    except Exception as exc:
+        logger.exception("Learning material generation failed")
+        record_usage(update, "presentation", status="error", text_preview=topic, error=str(exc))
+        await message.reply_text(
+            f"<b>Fayl tayyorlanmadi</b>\n<code>{html.escape(friendly_error(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message_obj = require_message(update)
     user = require_effective_user(update)
+    store = get_analytics()
+    is_new_user = not store.user_exists(user.id)
     record_usage(update, "start")
+    if is_new_user and OWNER_TELEGRAM_ID and user.id != OWNER_TELEGRAM_ID:
+        counts = store.subscriber_count()
+        username = f"@{user.username}" if user.username else "username yo'q"
+        await context.bot.send_message(
+            chat_id=OWNER_TELEGRAM_ID,
+            text=(
+                "Yangi foydalanuvchi qo'shildi\n\n"
+                f"Ism: {user.full_name}\n"
+                f"Username: {username}\n"
+                f"Telegram ID: {user.id}\n"
+                f"Jami foydalanuvchi: {counts['total']}"
+            )[:4096],
+        )
     greeting = f"Salom! Men AI Telegram botman. {START_EMOJI}"
     message = (
         f"{greeting}\n\n"
         "Uzbekcha, ruscha va inglizcha savollarga javob beraman, ovozli xabarni tushunaman, rasm chizaman, "
-        "Instagram/YouTube linklaridan audio yoki video tanlashga yordam beraman.\n\n"
+        "prezentatsiya va o'quv materiallari tayyorlayman, Instagram/YouTube linklaridan audio yoki video tanlashga yordam beraman.\n\n"
         f"Sizning Telegram ID: {user.id}\n"
         f"{image_limit_text(user.id)}\n\n"
         "Privatda savolni oddiy yozing. Guruhlarda meni /ai savol orqali chaqiring."
@@ -1001,22 +1119,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "<b>Yordam</b>\n\n"
         "<b>/ai</b> <i>savol</i> - AI javob\n"
         "<b>/image</b> <i>prompt</i> - rasm generatsiyasi\n"
+        "<b>/present</b> <i>mavzu</i> - prezentatsiya yoki o'quv fayli\n"
         "<b>/media audio</b> <i>LINK</i> - YouTube/Instagram audio\n"
         "<b>/media video</b> <i>LINK</i> - YouTube/Instagram video\n"
-        "<b>/payment</b> - limit va to'lov ma'lumoti\n"
         "<b>/radar</b> - trendlar\n\n"
         "<i>Privatda matn yoki ovoz yuborsangiz ham AI javob beradi. Guruhlarda faqat /ai orqali ishlayman.</i>",
-        parse_mode=ParseMode.HTML,
-    )
-
-
-async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = require_message(update)
-    user = require_effective_user(update)
-    record_usage(update, "payment")
-    await message.reply_text(
-        f"<b>Rasm limiti</b>\n{html.escape(image_limit_text(user.id))}\n\n"
-        f"<b>To'lov ma'lumoti</b>\n{html.escape(payment_status_text())}",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1081,6 +1188,19 @@ async def image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         record_usage(update, "image", status="empty")
         return
     await handle_image_request(update, prompt)
+
+
+async def present_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = require_message(update)
+    topic = " ".join(context_args(context)).strip()
+    if not topic:
+        await message.reply_text(
+            "<b>Mavzu yozing</b>\n<i>Masalan:</i> <code>/present Amir Temur haqida 8 slayd pptx</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        record_usage(update, "presentation", status="empty")
+        return
+    await send_learning_material(update, topic)
 
 
 async def media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1207,10 +1327,6 @@ async def answer_text(update: Update, text: str, action: str = "text") -> None:
 async def handle_image_request(update: Update, prompt: str) -> None:
     message = require_message(update)
     user_id = require_effective_user(update).id
-    if not has_premium_access(user_id) and get_analytics().user_image_count(user_id) >= IMAGE_FREE_LIMIT:
-        await message.reply_text(f"<b>Limit tugadi</b>\n{html.escape(image_payment_required_text())}", parse_mode=ParseMode.HTML)
-        record_usage(update, "image", status="payment_required", text_preview=prompt)
-        return
     await message.chat.send_action(ChatAction.UPLOAD_PHOTO)
     try:
         image_path = await generate_image(prompt)
@@ -1272,6 +1388,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if is_group_chat(update):
         return
+    if looks_like_presentation_request(text):
+        await send_learning_material(update, text)
+        return
     if looks_like_image_request(text):
         await handle_image_request(update, text)
         return
@@ -1327,14 +1446,14 @@ def build_application() -> Application:
     )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("payment", payment_command))
-    application.add_handler(CommandHandler("xazina", payment_command))
     application.add_handler(CommandHandler("radar", radar_command))
     application.add_handler(CommandHandler("necha_yulduz", radar_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("ai", ai_command))
     application.add_handler(CommandHandler("image", image_command))
     application.add_handler(CommandHandler("rasm", image_command))
+    application.add_handler(CommandHandler("present", present_command))
+    application.add_handler(CommandHandler("prezentatsiya", present_command))
     application.add_handler(CommandHandler("media", media_command))
     application.add_handler(CommandHandler("yt_ol", media_command))
     application.add_handler(CallbackQueryHandler(media_callback, pattern=r"^media\|"))
@@ -1458,7 +1577,7 @@ async def status() -> dict[str, object]:
     if not TELEGRAM_BOT_TOKEN:
         missing_config.append("TELEGRAM_BOT_TOKEN")
     if not AI_API_KEY:
-        missing_config.append("GROQ_API_KEY yoki GEMINI_API_KEY yoki OPENAI_API_KEY")
+        missing_config.append("GROQ_API_KEY yoki OPENAI_API_KEY")
     return {
         "status": "ok",
         "entrypoint": "bot.py",
@@ -1467,10 +1586,9 @@ async def status() -> dict[str, object]:
         "ai_model": OPENAI_TEXT_MODEL,
         "transcribe_model": OPENAI_TRANSCRIBE_MODEL,
         "ai_key": bool(AI_API_KEY),
+        "image_key": bool(OPENAI_IMAGE_API_KEY),
         "image_generation": IMAGE_GENERATION_ENABLED,
-        "image_free_limit": IMAGE_FREE_LIMIT,
         "media_download": MEDIA_DOWNLOAD_ENABLED,
-        "payment_enabled": PAYMENT_ENABLED,
         "analytics_db": ANALYTICS_DB_FILE,
         "missing_config": missing_config,
         "bot_initialized": bot_app is not None,

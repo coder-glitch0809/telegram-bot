@@ -9,5 +9,7 @@ __pycache__/
 *.pyc
 ai-image-*/
 media-*/
+.bot-temp/
+bot-temp/
 bot-run*.log
 bot (*).py
