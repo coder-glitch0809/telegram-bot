@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -119,6 +120,12 @@ MEDIA_DOWNLOAD_ENABLED = os.getenv("MEDIA_DOWNLOAD_ENABLED", os.getenv("YOUTUBE_
     "ha",
 }
 MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", os.getenv("YOUTUBE_MAX_MB", "45")) or 45)
+KINOTOP_OWNER_ID = 896778319
+KINOTOP_ALLOWED_DOMAINS = {
+    domain.strip().lower().removeprefix("www.")
+    for domain in os.getenv("KINOTOP_ALLOWED_DOMAINS", "").split(",")
+    if domain.strip()
+}
 DEFAULT_ANALYTICS_DB_FILE = (
     str(Path(tempfile.gettempdir()) / "bot_analytics.sqlite3")
     if os.getenv("VERCEL") or os.getenv("VERCEL_URL")
@@ -446,6 +453,18 @@ def get_analytics() -> AnalyticsStore:
 
 def is_owner(user_id: int) -> bool:
     return OWNER_TELEGRAM_ID != 0 and user_id == OWNER_TELEGRAM_ID
+
+
+def get_url_domain(url: str) -> str:
+    parsed = urlparse(url.strip())
+    return (parsed.hostname or "").lower().removeprefix("www.")
+
+
+def is_kinotop_allowed_url(url: str) -> bool:
+    domain = get_url_domain(url)
+    if not domain or not KINOTOP_ALLOWED_DOMAINS:
+        return False
+    return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in KINOTOP_ALLOWED_DOMAINS)
 
 
 def email_reports_enabled() -> bool:
@@ -1229,6 +1248,39 @@ async def media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await handle_media_download(update, url, media_type)
 
 
+async def kinotop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = require_message(update)
+    user = update.effective_user
+    if not user or user.id != KINOTOP_OWNER_ID:
+        return
+    if not MEDIA_DOWNLOAD_ENABLED:
+        await message.reply_text("<b>Media yuklash</b>\n<i>Hozir o'chirilgan.</i>", parse_mode=ParseMode.HTML)
+        record_usage(update, "kinotop", status="disabled")
+        return
+    if not KINOTOP_ALLOWED_DOMAINS:
+        await message.reply_text(
+            "<b>Kinotop sozlanmagan</b>\n<code>KINOTOP_ALLOWED_DOMAINS</code> ichiga domenlarni vergul bilan yozing.",
+            parse_mode=ParseMode.HTML,
+        )
+        record_usage(update, "kinotop", status="not_configured")
+        return
+    args = context_args(context)
+    if not args:
+        await message.reply_text("<b>Link yuboring</b>\n<code>/kinotop https://site.com/video</code>", parse_mode=ParseMode.HTML)
+        record_usage(update, "kinotop", status="empty")
+        return
+    url = args[0].strip()
+    if not URL_RE.fullmatch(url):
+        await message.reply_text("<b>Link noto'g'ri</b>\nTo'liq <code>https://...</code> link yuboring.", parse_mode=ParseMode.HTML)
+        record_usage(update, "kinotop", status="bad_url", text_preview=url)
+        return
+    if not is_kinotop_allowed_url(url):
+        await message.reply_text("<b>Domen ruxsatda yo'q</b>\nBu link whitelist ichidagi saytdan emas.", parse_mode=ParseMode.HTML)
+        record_usage(update, "kinotop", status="domain_blocked", text_preview=get_url_domain(url))
+        return
+    await handle_media_download(update, url, "video", allow_custom_url=True)
+
+
 async def media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = cast(Any, update.callback_query)
     if query is None:
@@ -1243,9 +1295,15 @@ async def media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await handle_media_download(update, url, media_type, from_callback=True)
 
 
-async def handle_media_download(update: Update, url: str, media_type: str, from_callback: bool = False) -> None:
+async def handle_media_download(
+    update: Update,
+    url: str,
+    media_type: str,
+    from_callback: bool = False,
+    allow_custom_url: bool = False,
+) -> None:
     message = require_message(update)
-    if not MEDIA_URL_RE.match(url):
+    if not allow_custom_url and not MEDIA_URL_RE.match(url):
         await message.reply_text("<b>Link noto'g'ri</b>\nFaqat <i>YouTube</i> yoki <i>Instagram</i> link yuboring.", parse_mode=ParseMode.HTML)
         record_usage(update, "media", status="bad_url", text_preview=url)
         return
@@ -1456,6 +1514,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("prezentatsiya", present_command))
     application.add_handler(CommandHandler("media", media_command))
     application.add_handler(CommandHandler("yt_ol", media_command))
+    application.add_handler(CommandHandler("kinotop", kinotop_command))
     application.add_handler(CallbackQueryHandler(media_callback, pattern=r"^media\|"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, greet_new_members))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
