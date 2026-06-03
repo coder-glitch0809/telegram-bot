@@ -1,0 +1,7 @@
+{
+  "include": ["bot.py", "app.py", "api"],
+  "exclude": ["**/__pycache__", ".venv", "bot (5).py"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "basic"
+}

@@ -12,12 +12,12 @@ import time
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity, Update
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, TimedOut
@@ -29,6 +29,13 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+Agent = Runner = None
+set_default_openai_api = set_default_openai_client = set_tracing_disabled = None
+try:
+    from agents import Agent, Runner, set_default_openai_api, set_default_openai_client, set_tracing_disabled
+except ImportError:
+    pass
 
 
 load_dotenv()
@@ -137,11 +144,11 @@ WARNING_CUSTOM_EMOJI_ID = "5215305227627931680"
 IDEA_EMOJI = "\U0001F4A1"
 IDEA_CUSTOM_EMOJI_ID = "5355014749920709843"
 BOT_EMOJI = "\U0001F916"
-BOT_CUSTOM_EMOJI_ID = "5971808079811972376"
+BOT_CUSTOM_EMOJI_ID = "5372981976804366741"
 PHOTO_EMOJI = "\U0001F4F7"
 PHOTO_CUSTOM_EMOJI_ID = "5429187662596561219"
 CHAT_EMOJI = "\U0001F4AC"
-CHAT_CUSTOM_EMOJI_ID = "5433688620819035248"
+CHAT_CUSTOM_EMOJI_ID = "5443038326535759644"
 SEARCH_EMOJI = "\U0001F50E"
 SEARCH_CUSTOM_EMOJI_ID = "5188311512791393083"
 PREMIUM_EMOJI = "\U0001F451"
@@ -199,10 +206,16 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-openai_client_kwargs = {"api_key": AI_API_KEY or "missing"}
 if AI_BASE_URL:
-    openai_client_kwargs["base_url"] = AI_BASE_URL
-openai_client = OpenAI(**openai_client_kwargs)
+    openai_client = OpenAI(api_key=AI_API_KEY or "missing", base_url=AI_BASE_URL)
+    agents_client = AsyncOpenAI(api_key=AI_API_KEY or "missing", base_url=AI_BASE_URL)
+else:
+    openai_client = OpenAI(api_key=AI_API_KEY or "missing")
+    agents_client = AsyncOpenAI(api_key=AI_API_KEY or "missing")
+if set_default_openai_client and set_default_openai_api and set_tracing_disabled:
+    set_default_openai_client(agents_client, use_for_tracing=False)
+    set_default_openai_api("chat_completions")
+    set_tracing_disabled(True)
 image_client = OpenAI(api_key=OPENAI_API_KEY or AI_API_KEY or "missing")
 analytics: "AnalyticsStore | None" = None
 bot_app: "Application | None" = None
@@ -559,8 +572,26 @@ async def setup_bot_commands(application: Application) -> None:
     )
 
 
-def telegram_user_details(update: Update) -> tuple[int, str, str]:
+def require_effective_user(update: Update) -> Any:
     user = update.effective_user
+    if user is None:
+        raise RuntimeError("Telegram update ichida foydalanuvchi topilmadi.")
+    return user
+
+
+def require_message(update: Update) -> Any:
+    message = update.message or update.effective_message
+    if message is None:
+        raise RuntimeError("Telegram update ichida xabar topilmadi.")
+    return message
+
+
+def context_args(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
+    return list(context.args or [])
+
+
+def telegram_user_details(update: Update) -> tuple[int, str, str]:
+    user = require_effective_user(update)
     username = user.username or ""
     full_name = user.full_name or username or "user"
     return user.id, username, full_name
@@ -645,10 +676,7 @@ def friendly_error(exc: Exception) -> str:
     return message[:700]
 
 
-async def ask_ai(text: str) -> str:
-    if not AI_API_KEY:
-        raise RuntimeError(f"{AI_PROVIDER.upper()} uchun API key topilmadi. .env ichidagi AI_PROVIDER va mos API keyni tekshiring.")
-
+def build_chat_instructions(text: str) -> str:
     excel_mode = looks_like_excel_list_request(text)
     emoji_guide = (
         f"Bot/yordamchi mavzusi: {custom_emoji_html(BOT_EMOJI, BOT_CUSTOM_EMOJI_ID)}; "
@@ -660,43 +688,60 @@ async def ask_ai(text: str) -> str:
         f"premium/pro: {custom_emoji_html(PREMIUM_EMOJI, PREMIUM_CUSTOM_EMOJI_ID)}; "
         f"kutish/jarayon: {custom_emoji_html(WAIT_EMOJI, WAIT_CUSTOM_EMOJI_ID)}."
     )
-    response = await asyncio.to_thread(
+    return (
+        "Siz Telegram ichidagi zamonaviy AI yordamchisiz. "
+        "Asosan o'zbekcha, ruscha va inglizcha muloqot qiling; foydalanuvchi qaysi tilda yozsa, shu tilda javob bering. "
+        "Javoblar aniq, foydali, tabiiy va qisqa bo'lsin. "
+        "Javobni Telegram HTML formatida yozing: faqat <b>, <i>, <code>, <pre> va <tg-emoji> taglaridan foydalaning. "
+        "Markdown belgilarini ishlatmang. Mavzuga mos 1-4 ta animated emoji qo'shing, lekin ortiqcha bezamang. "
+        f"Faqat shu custom emoji taglaridan foydalaning: {emoji_guide} "
+        "18+ pornografik, jinsiy ekspluatatsiya yoki noqonuniy materiallarni yaratmang, topmang va tarqatmang. "
+        "Bunday so'rovda qisqa rad etib, xavfsiz alternativ taklif qiling. "
+        "HTML taglarni doim to'g'ri yoping va javobni Telegramda o'qishga qulay qiling."
+        + (
+            " Agar foydalanuvchi Excel, CSV, jadval, ro'yxat, spisok yoki spreadsheet uchun format so'rasa, "
+            "javobni faqat <pre> ichida tab bilan ajratilgan TSV jadval ko'rinishida yozing. "
+            "Birinchi qatorda ustun nomlari bo'lsin. Emoji, markdown, ortiqcha izoh va HTML tag ishlatmang; faqat bitta <pre>...</pre> blok qaytaring."
+            if excel_mode
+            else ""
+        )
+    )
+
+
+async def ask_ai(text: str) -> str:
+    if not AI_API_KEY:
+        raise RuntimeError(f"{AI_PROVIDER.upper()} uchun API key topilmadi. .env ichidagi AI_PROVIDER va mos API keyni tekshiring.")
+
+    instructions = build_chat_instructions(text)
+    if Agent and Runner:
+        chat_agent = Agent(
+            name="Telegram Chat Agent",
+            instructions=instructions,
+            model=OPENAI_TEXT_MODEL,
+        )
+        result = await Runner.run(chat_agent, text)
+        return str(result.final_output or "").strip()
+
+    response = cast(Any, await asyncio.to_thread(
         lambda: ai_call_with_retries(
             lambda: openai_client.chat.completions.create(
                 model=OPENAI_TEXT_MODEL,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Siz Telegram ichidagi zamonaviy AI yordamchisiz. "
-                            "Asosan o'zbekcha, ruscha va inglizcha muloqot qiling; foydalanuvchi qaysi tilda yozsa, shu tilda javob bering. "
-                            "Javoblar aniq, foydali, tabiiy va qisqa bo'lsin. "
-                            "Javobni Telegram HTML formatida yozing: faqat <b>, <i>, <code>, <pre> va <tg-emoji> taglaridan foydalaning. "
-                            "Markdown belgilarini ishlatmang. Mavzuga mos 1-4 ta animated emoji qo'shing, lekin ortiqcha bezamang. "
-                            f"Faqat shu custom emoji taglaridan foydalaning: {emoji_guide} "
-                            "18+ pornografik, jinsiy ekspluatatsiya yoki noqonuniy materiallarni yaratmang, topmang va tarqatmang. "
-                            "Bunday so'rovda qisqa rad etib, xavfsiz alternativ taklif qiling. "
-                            "HTML taglarni doim to'g'ri yoping va javobni Telegramda o'qishga qulay qiling."
-                            + (
-                                " Agar foydalanuvchi Excel, CSV, jadval, ro'yxat, spisok yoki spreadsheet uchun format so'rasa, "
-                                "javobni faqat <pre> ichida tab bilan ajratilgan TSV jadval ko'rinishida yozing. "
-                                "Birinchi qatorda ustun nomlari bo'lsin. Emoji, markdown, ortiqcha izoh va HTML tag ishlatmang; faqat bitta <pre>...</pre> blok qaytaring."
-                                if excel_mode
-                                else ""
-                            )
-                        ),
-                    },
+                    {"role": "system", "content": instructions},
                     {"role": "user", "content": text},
                 ],
                 temperature=0.45,
             )
         )
-    )
+    ))
     return (response.choices[0].message.content or "").strip()
 
 
 async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    voice = update.message.voice
+    message = require_message(update)
+    voice = message.voice
+    if voice is None:
+        raise RuntimeError("Ovozli xabar topilmadi.")
     telegram_file = await context.bot.get_file(voice.file_id)
     with tempfile.TemporaryDirectory() as tmp_dir:
         audio_path = Path(tmp_dir) / "voice.ogg"
@@ -720,11 +765,11 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 result = resp.json()
             return result["candidates"][0]["content"]["parts"][0]["text"].strip()
         with audio_path.open("rb") as audio_file:
-            transcription = await asyncio.to_thread(
+            transcription = cast(Any, await asyncio.to_thread(
                 lambda: ai_call_with_retries(
                     lambda: openai_client.audio.transcriptions.create(model=OPENAI_TRANSCRIBE_MODEL, file=audio_file)
                 )
-            )
+            ))
         return transcription.text.strip()
 
 
@@ -746,14 +791,17 @@ async def generate_image(prompt: str) -> Path:
             n=1,
         )
     )
+    if not response.data:
+        raise RuntimeError("AI rasm qaytarmadi.")
     image_data = response.data[0]
     output_path = Path(tempfile.mkdtemp(prefix="ai-image-")) / "image.png"
     if getattr(image_data, "b64_json", None):
-        output_path.write_bytes(base64.b64decode(image_data.b64_json))
+        output_path.write_bytes(base64.b64decode(str(image_data.b64_json)))
         return output_path
     if getattr(image_data, "url", None):
+        image_url = str(image_data.url)
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.get(image_data.url)
+            resp = await client.get(image_url)
             resp.raise_for_status()
             output_path.write_bytes(resp.content)
             return output_path
@@ -819,7 +867,7 @@ def download_media(url: str, media_type: str) -> tuple[Path, str, int | None]:
             options["format"] += f"/bestvideo[filesize<{MEDIA_MAX_MB}M]+bestaudio/best"
             options["merge_output_format"] = "mp4"
 
-    with yt_dlp.YoutubeDL(options) as ydl:
+    with yt_dlp.YoutubeDL(cast(Any, options)) as ydl:
         try:
             info = ydl.extract_info(url, download=True)
         except DownloadError as exc:
@@ -828,10 +876,13 @@ def download_media(url: str, media_type: str) -> tuple[Path, str, int | None]:
             fallback_options = {**options, "format": "bestaudio/best" if media_type == "audio" else "best[ext=mp4]/best"}
             fallback_options.pop("postprocessors", None)
             fallback_options.pop("merge_output_format", None)
-            with yt_dlp.YoutubeDL(fallback_options) as fallback_ydl:
+            with yt_dlp.YoutubeDL(cast(Any, fallback_options)) as fallback_ydl:
                 info = fallback_ydl.extract_info(url, download=True)
+        if info is None:
+            raise RuntimeError("Media ma'lumoti qaytmadi.")
         title = str(info.get("title") or "media")
-        duration = int(info["duration"]) if info.get("duration") else None
+        duration_value = info.get("duration")
+        duration = int(duration_value) if duration_value is not None else None
         age_limit = int(info.get("age_limit") or 0)
         if age_limit >= 18 or contains_adult_content(title):
             raise ValueError("18+ media tarqatilmaydi.")
@@ -892,7 +943,8 @@ async def reply_html_or_plain(message: Any, text: str) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
+    message_obj = require_message(update)
+    user = require_effective_user(update)
     record_usage(update, "start")
     greeting = f"Salom! Men AI Telegram botman. {START_EMOJI}"
     message = (
@@ -918,7 +970,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     for attempt in range(3):
         try:
-            await update.message.reply_text(
+            await message_obj.reply_text(
                 message,
                 entities=entities,
                 read_timeout=60,
@@ -928,7 +980,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
         except BadRequest:
-            await update.message.reply_text(
+            await message_obj.reply_text(
                 message,
                 read_timeout=60,
                 write_timeout=60,
@@ -943,8 +995,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = require_message(update)
     record_usage(update, "help")
-    await update.message.reply_text(
+    await message.reply_text(
         "<b>Yordam</b>\n\n"
         "<b>/ai</b> <i>savol</i> - AI javob\n"
         "<b>/image</b> <i>prompt</i> - rasm generatsiyasi\n"
@@ -958,17 +1011,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def payment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = require_message(update)
+    user = require_effective_user(update)
     record_usage(update, "payment")
-    await update.message.reply_text(
-        f"<b>Rasm limiti</b>\n{html.escape(image_limit_text(update.effective_user.id))}\n\n"
+    await message.reply_text(
+        f"<b>Rasm limiti</b>\n{html.escape(image_limit_text(user.id))}\n\n"
         f"<b>To'lov ma'lumoti</b>\n{html.escape(payment_status_text())}",
         parse_mode=ParseMode.HTML,
     )
 
 
 async def radar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text("<b>Radar</b>\n<i>Bu bo'lim faqat bot egasi uchun.</i>", parse_mode=ParseMode.HTML)
+    message = require_message(update)
+    user = require_effective_user(update)
+    if not is_owner(user.id):
+        await message.reply_text("<b>Radar</b>\n<i>Bu bo'lim faqat bot egasi uchun.</i>", parse_mode=ParseMode.HTML)
         record_usage(update, "radar", status="denied")
         return
     counts = get_analytics().subscriber_count()
@@ -985,23 +1042,26 @@ async def radar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ]
     lines.extend(f"- {html.escape(item)}" for item in top_queries) if top_queries else lines.append("<i>Hali yetarli so'rov yo'q</i>")
     record_usage(update, "radar")
-    await update.message.reply_text("\n".join(lines)[:4096], parse_mode=ParseMode.HTML)
+    await message.reply_text("\n".join(lines)[:4096], parse_mode=ParseMode.HTML)
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text("<b>Hisobot</b>\n<i>Bu bo'lim faqat bot egasi uchun.</i>", parse_mode=ParseMode.HTML)
+    message = require_message(update)
+    user = require_effective_user(update)
+    if not is_owner(user.id):
+        await message.reply_text("<b>Hisobot</b>\n<i>Bu bo'lim faqat bot egasi uchun.</i>", parse_mode=ParseMode.HTML)
         record_usage(update, "report", status="denied")
         return
     report = get_analytics().build_report("Oxirgi 7 kunlik Telegram AI bot hisoboti", start_at=datetime.now() - timedelta(days=7))
     record_usage(update, "report")
-    await update.message.reply_text(f"<pre>{html.escape(report[:4000])}</pre>", parse_mode=ParseMode.HTML)
+    await message.reply_text(f"<pre>{html.escape(report[:4000])}</pre>", parse_mode=ParseMode.HTML)
 
 
 async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = " ".join(context.args).strip()
+    message = require_message(update)
+    text = " ".join(context_args(context)).strip()
     if not text:
-        await update.message.reply_text(
+        await message.reply_text(
             "<b>Savolni ham yozing</b>\n<i>Masalan:</i> <code>/ai nima yordam bera olasan?</code>",
             parse_mode=ParseMode.HTML,
         )
@@ -1011,9 +1071,10 @@ async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    prompt = " ".join(context.args).strip()
+    message = require_message(update)
+    prompt = " ".join(context_args(context)).strip()
     if not prompt:
-        await update.message.reply_text(
+        await message.reply_text(
             "<b>Rasm uchun prompt yozing</b>\n<i>Masalan:</i> <code>/image futuristik Toshkent</code>",
             parse_mode=ParseMode.HTML,
         )
@@ -1023,34 +1084,39 @@ async def image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = require_message(update)
+    args = context_args(context)
     if not MEDIA_DOWNLOAD_ENABLED:
-        await update.message.reply_text("<b>Media yuklash</b>\n<i>Hozir o'chirilgan.</i>", parse_mode=ParseMode.HTML)
+        await message.reply_text("<b>Media yuklash</b>\n<i>Hozir o'chirilgan.</i>", parse_mode=ParseMode.HTML)
         record_usage(update, "media", status="disabled")
         return
-    if len(context.args) < 2:
-        await update.message.reply_text(
+    if len(args) < 2:
+        await message.reply_text(
             "<b>Format</b>\n<code>/media audio LINK</code>\nyoki\n<code>/media video LINK</code>",
             parse_mode=ParseMode.HTML,
         )
         record_usage(update, "media", status="empty")
         return
-    media_type = context.args[0].strip().lower()
-    url = context.args[1].strip()
+    media_type = args[0].strip().lower()
+    url = args[1].strip()
     if media_type not in {"audio", "video"}:
-        await update.message.reply_text(
+        await message.reply_text(
             "<b>Format xato</b>\nBirinchi so'z <code>audio</code> yoki <code>video</code> bo'lishi kerak.",
             parse_mode=ParseMode.HTML,
         )
-        record_usage(update, "media", status="bad_type", text_preview=" ".join(context.args))
+        record_usage(update, "media", status="bad_type", text_preview=" ".join(args))
         return
     await handle_media_download(update, url, media_type)
 
 
 async def media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
+    query = cast(Any, update.callback_query)
+    if query is None:
+        return
     await query.answer()
     _, media_type = query.data.split("|", 1)
-    url = context.user_data.get("pending_media_url", "")
+    user_data = cast(dict[str, Any], context.user_data or {})
+    url = user_data.get("pending_media_url", "")
     if not url:
         await query.message.reply_text("<b>Link topilmadi</b>\n<i>Iltimos, linkni qayta yuboring.</i>", parse_mode=ParseMode.HTML)
         return
@@ -1058,7 +1124,7 @@ async def media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def handle_media_download(update: Update, url: str, media_type: str, from_callback: bool = False) -> None:
-    message = update.effective_message
+    message = require_message(update)
     if not MEDIA_URL_RE.match(url):
         await message.reply_text("<b>Link noto'g'ri</b>\nFaqat <i>YouTube</i> yoki <i>Instagram</i> link yuboring.", parse_mode=ParseMode.HTML)
         record_usage(update, "media", status="bad_url", text_preview=url)
@@ -1107,45 +1173,49 @@ async def handle_media_download(update: Update, url: str, media_type: str, from_
     record_usage(update, "media", text_preview=url)
     if from_callback:
         try:
-            await update.callback_query.edit_message_reply_markup(reply_markup=None)
+            query = cast(Any, update.callback_query)
+            if query is not None:
+                await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             logger.debug("Callback markupni o'chirib bo'lmadi", exc_info=True)
 
 
 async def answer_text(update: Update, text: str, action: str = "text") -> None:
+    message = require_message(update)
     if contains_adult_content(text):
-        await update.message.reply_text(
+        await message.reply_text(
             "<b>Bu mavzuda yordam bera olmayman</b>\n<i>Xavfsiz, ta'limiy yoki ijodiy mavzu tanlang.</i>",
             parse_mode=ParseMode.HTML,
         )
         record_usage(update, action, status="adult_blocked", text_preview=text)
         return
-    await update.message.chat.send_action(ChatAction.TYPING)
+    await message.chat.send_action(ChatAction.TYPING)
     try:
         answer = await ask_ai(text)
     except Exception as exc:
         logger.exception("AI request failed")
         record_usage(update, action, status="error", text_preview=text, error=str(exc))
-        await update.message.reply_text(
+        await message.reply_text(
             f"<b>AI javob bera olmadi</b>\n<code>{html.escape(friendly_error(exc))}</code>",
             parse_mode=ParseMode.HTML,
         )
         return
     record_usage(update, action, text_preview=text, response_chars=len(answer))
-    await reply_html_or_plain(update.message, answer)
+    await reply_html_or_plain(message, answer)
 
 
 async def handle_image_request(update: Update, prompt: str) -> None:
-    user_id = update.effective_user.id
+    message = require_message(update)
+    user_id = require_effective_user(update).id
     if not has_premium_access(user_id) and get_analytics().user_image_count(user_id) >= IMAGE_FREE_LIMIT:
-        await update.message.reply_text(f"<b>Limit tugadi</b>\n{html.escape(image_payment_required_text())}", parse_mode=ParseMode.HTML)
+        await message.reply_text(f"<b>Limit tugadi</b>\n{html.escape(image_payment_required_text())}", parse_mode=ParseMode.HTML)
         record_usage(update, "image", status="payment_required", text_preview=prompt)
         return
-    await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
+    await message.chat.send_action(ChatAction.UPLOAD_PHOTO)
     try:
         image_path = await generate_image(prompt)
         with image_path.open("rb") as image_file:
-            await update.message.reply_photo(
+            await message.reply_photo(
                 photo=image_file,
                 caption=f"<b>Rasm tayyor</b>\n{html.escape(image_limit_text(user_id))}"[:1000],
                 parse_mode=ParseMode.HTML,
@@ -1153,7 +1223,7 @@ async def handle_image_request(update: Update, prompt: str) -> None:
     except Exception as exc:
         logger.exception("Image generation failed")
         record_usage(update, "image", status="error", text_preview=prompt, error=str(exc))
-        await update.message.reply_text(
+        await message.reply_text(
             f"<b>Rasm tayyorlanmadi</b>\n<code>{html.escape(friendly_error(exc))}</code>",
             parse_mode=ParseMode.HTML,
         )
@@ -1162,21 +1232,22 @@ async def handle_image_request(update: Update, prompt: str) -> None:
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = require_message(update)
     if is_group_chat(update):
-        await update.message.reply_text(
+        await message.reply_text(
             "<b>Ovozli xabar</b>\nGuruhlarda AI uchun <code>/ai savol</code> yozing. "
             "<i>Privatda voice yuborsangiz javob beraman.</i>",
             parse_mode=ParseMode.HTML,
         )
         record_usage(update, "voice", status="group_ignored")
         return
-    await update.message.chat.send_action(ChatAction.TYPING)
+    await message.chat.send_action(ChatAction.TYPING)
     try:
         text = await transcribe_voice(update, context)
     except Exception as exc:
         logger.exception("Voice transcription failed")
         record_usage(update, "voice", status="error", error=str(exc))
-        await update.message.reply_text(
+        await message.reply_text(
             f"<b>Ovozni matnga aylantirib bo'lmadi</b>\n<code>{html.escape(friendly_error(exc))}</code>",
             parse_mode=ParseMode.HTML,
         )
@@ -1186,11 +1257,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text.strip()
+    message = require_message(update)
+    text = (message.text or "").strip()
     urls = URL_RE.findall(text)
     if urls and MEDIA_URL_RE.match(urls[0]):
-        context.user_data["pending_media_url"] = urls[0]
-        await update.message.reply_text(
+        user_data = cast(dict[str, Any], context.user_data or {})
+        user_data["pending_media_url"] = urls[0]
+        await message.reply_text(
             "<b>Nimani olishni tanlang?</b>",
             reply_markup=media_keyboard(),
             parse_mode=ParseMode.HTML,
