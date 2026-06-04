@@ -27,6 +27,7 @@ from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -1391,8 +1392,16 @@ async def maybe_handle_love_message(update: Update, context: ContextTypes.DEFAUL
     message = require_message(update)
     user = require_effective_user(update)
     session = get_analytics().get_love_session_by_user(user.id)
-    if session is None or not session["partner_id"]:
+    if session is None:
         return False
+    if not session["partner_id"]:
+        await message.reply_text(
+            "<b>Secret chat kutilyapti.</b>\n<i>Sherik hali invite kod/link orqali kirmagan. AI bu chatda ishlamaydi.</i>",
+            parse_mode=ParseMode.HTML,
+            protect_content=True,
+        )
+        record_usage(update, "love", status="waiting", text_preview=text)
+        return True
     owner_id = int(session["owner_id"])
     partner_id = int(session["partner_id"])
     if user.id == owner_id:
@@ -1409,8 +1418,9 @@ async def maybe_handle_love_message(update: Update, context: ContextTypes.DEFAUL
             chat_id=target_id,
             text=f"{prefix}\n{html.escape(text)[:3800]}",
             parse_mode=ParseMode.HTML,
+            protect_content=True,
         )
-        await message.reply_text("<i>Yuborildi.</i>", parse_mode=ParseMode.HTML)
+        await message.reply_text("<i>Secret chatga yuborildi.</i>", parse_mode=ParseMode.HTML, protect_content=True)
         record_usage(update, "love", text_preview=text)
     except Exception as exc:
         logger.exception("Love chat relay failed")
@@ -1420,6 +1430,51 @@ async def maybe_handle_love_message(update: Update, context: ContextTypes.DEFAUL
         )
         record_usage(update, "love", status="error", text_preview=text, error=str(exc))
     return True
+
+
+async def handle_love_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if is_group_chat(update):
+        return
+    message = require_message(update)
+    user = require_effective_user(update)
+    session = get_analytics().get_love_session_by_user(user.id)
+    if session is None:
+        return
+    if not session["partner_id"]:
+        await message.reply_text(
+            "<b>Secret chat kutilyapti.</b>\n<i>Sherik hali invite kod/link orqali kirmagan. Media AIga yuborilmadi.</i>",
+            parse_mode=ParseMode.HTML,
+            protect_content=True,
+        )
+        record_usage(update, "love", status="waiting_media")
+        raise ApplicationHandlerStop
+    owner_id = int(session["owner_id"])
+    partner_id = int(session["partner_id"])
+    if user.id == owner_id:
+        target_id = partner_id
+    elif user.id == partner_id:
+        target_id = owner_id
+    else:
+        return
+    try:
+        await context.bot.copy_message(
+            chat_id=target_id,
+            from_chat_id=message.chat_id,
+            message_id=message.message_id,
+            protect_content=True,
+        )
+        await message.reply_text("<i>Secret chatga yuborildi.</i>", parse_mode=ParseMode.HTML, protect_content=True)
+        record_usage(update, "love", status="media")
+        raise ApplicationHandlerStop
+    except Exception as exc:
+        logger.exception("Love chat media relay failed")
+        await message.reply_text(
+            f"<b>Secret chat mediasi yuborilmadi</b>\n<code>{html.escape(friendly_error(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+            protect_content=True,
+        )
+        record_usage(update, "love", status="error", error=str(exc))
+        raise ApplicationHandlerStop
 
 
 async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1781,6 +1836,16 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("admin_status", admin_status_command))
     application.add_handler(CallbackQueryHandler(media_callback, pattern=r"^media\|"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, greet_new_members))
+    love_media_filter = (
+        filters.PHOTO
+        | filters.VIDEO
+        | filters.Document.ALL
+        | filters.AUDIO
+        | filters.VOICE
+        | filters.VIDEO_NOTE
+        | filters.ANIMATION
+    )
+    application.add_handler(MessageHandler(love_media_filter, handle_love_media), group=-1)
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error_handler)
