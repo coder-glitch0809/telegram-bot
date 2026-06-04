@@ -7,6 +7,8 @@ import re
 import shutil
 import smtplib
 import sqlite3
+import secrets
+import string
 import tempfile
 import time
 import uuid
@@ -121,10 +123,22 @@ MEDIA_DOWNLOAD_ENABLED = os.getenv("MEDIA_DOWNLOAD_ENABLED", os.getenv("YOUTUBE_
 }
 MEDIA_MAX_MB = int(os.getenv("MEDIA_MAX_MB", os.getenv("YOUTUBE_MAX_MB", "45")) or 45)
 KINOTOP_OWNER_ID = 896778319
+LOVE_OWNER_ID = 896778319
+LOVE_CODE_ALPHABET = string.ascii_uppercase + string.digits
+
+
+def normalize_domain(value: str) -> str:
+    value = value.strip().lower().rstrip("/")
+    if not value:
+        return ""
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    return (parsed.hostname or "").lower().removeprefix("www.")
+
+
 KINOTOP_ALLOWED_DOMAINS = {
-    domain.strip().lower().removeprefix("www.")
-    for domain in os.getenv("KINOTOP_ALLOWED_DOMAINS", "").split(",")
-    if domain.strip()
+    domain
+    for domain in (normalize_domain(item) for item in os.getenv("KINOTOP_ALLOWED_DOMAINS", "").split(","))
+    if domain
 }
 DEFAULT_ANALYTICS_DB_FILE = (
     str(Path(tempfile.gettempdir()) / "bot_analytics.sqlite3")
@@ -269,6 +283,19 @@ class AnalyticsStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS love_sessions (
+                    code TEXT PRIMARY KEY,
+                    owner_id INTEGER NOT NULL,
+                    partner_id INTEGER,
+                    partner_name TEXT,
+                    created_at TEXT NOT NULL,
+                    joined_at TEXT,
+                    closed_at TEXT
+                )
+                """
+            )
 
     def record_interaction(
         self,
@@ -343,6 +370,67 @@ class AnalyticsStore:
                 "INSERT OR REPLACE INTO sent_reports (report_key, sent_at) VALUES (?, ?)",
                 (report_key, datetime.now().isoformat(timespec="seconds")),
             )
+
+    def create_love_invite(self, owner_id: int, code: str) -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE love_sessions SET closed_at = ? WHERE owner_id = ? AND closed_at IS NULL",
+                (now, owner_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO love_sessions (code, owner_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (code, owner_id, now),
+            )
+
+    def join_love_session(self, code: str, partner_id: int, partner_name: str) -> sqlite3.Row | None:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM love_sessions
+                WHERE code = ? AND closed_at IS NULL
+                """,
+                (code,),
+            ).fetchone()
+            if row is None or int(row["owner_id"]) == partner_id:
+                return None
+            if row["partner_id"] and int(row["partner_id"]) != partner_id:
+                return row
+            connection.execute(
+                """
+                UPDATE love_sessions
+                SET partner_id = ?, partner_name = ?, joined_at = COALESCE(joined_at, ?)
+                WHERE code = ?
+                """,
+                (partner_id, partner_name[:120], now, code),
+            )
+            return connection.execute("SELECT * FROM love_sessions WHERE code = ?", (code,)).fetchone()
+
+    def get_love_session_by_user(self, user_id: int) -> sqlite3.Row | None:
+        with self._connect() as connection:
+            return connection.execute(
+                """
+                SELECT * FROM love_sessions
+                WHERE closed_at IS NULL
+                AND (owner_id = ? OR partner_id = ?)
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (user_id, user_id),
+            ).fetchone()
+
+    def close_love_session(self, user_id: int) -> sqlite3.Row | None:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as connection:
+            row = self.get_love_session_by_user(user_id)
+            if row is None:
+                return None
+            connection.execute("UPDATE love_sessions SET closed_at = ? WHERE code = ?", (now, row["code"]))
+            return row
 
     def subscriber_count(self) -> dict[str, int]:
         now = datetime.now()
@@ -455,9 +543,12 @@ def is_owner(user_id: int) -> bool:
     return OWNER_TELEGRAM_ID != 0 and user_id == OWNER_TELEGRAM_ID
 
 
+def make_love_code(length: int = 8) -> str:
+    return "".join(secrets.choice(LOVE_CODE_ALPHABET) for _ in range(length))
+
+
 def get_url_domain(url: str) -> str:
-    parsed = urlparse(url.strip())
-    return (parsed.hostname or "").lower().removeprefix("www.")
+    return normalize_domain(url)
 
 
 def is_kinotop_allowed_url(url: str) -> bool:
@@ -1068,6 +1159,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message_obj = require_message(update)
     user = require_effective_user(update)
     store = get_analytics()
+    args = context_args(context)
+    if args and args[0].strip().lower().startswith("love_"):
+        code = args[0].strip()[5:].upper()
+        session = store.join_love_session(code, user.id, user.full_name)
+        if session is None:
+            await message_obj.reply_text("<b>Secret chat</b>\n<i>Link noto'g'ri yoki yopilgan.</i>", parse_mode=ParseMode.HTML)
+            record_usage(update, "love", status="bad_link")
+            return
+        if session["partner_id"] and int(session["partner_id"]) != user.id:
+            await message_obj.reply_text("<b>Secret chat</b>\n<i>Bu invite allaqachon band.</i>", parse_mode=ParseMode.HTML)
+            record_usage(update, "love", status="occupied")
+            return
+        await message_obj.reply_text(
+            "<b>Secret chat ochildi.</b>\n"
+            "<i>Bu yerdagi matnlaringiz anonim chat sherigiga yuboriladi. Yopish uchun /love close yozing.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=int(session["owner_id"]),
+                text=(
+                    "<b>Secret chatga sherik kirdi.</b>\n"
+                    f"Ism: <code>{html.escape(user.full_name)}</code>\n"
+                    f"ID: <code>{user.id}</code>\n"
+                    "<i>Endi oddiy matn yozsangiz sherikka anonim boradi.</i>"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            logger.debug("Love chat owner notice yuborilmadi", exc_info=True)
+        record_usage(update, "love", status="joined")
+        return
     is_new_user = not store.user_exists(user.id)
     record_usage(update, "start")
     if is_new_user and OWNER_TELEGRAM_ID and user.id != OWNER_TELEGRAM_ID:
@@ -1183,6 +1306,122 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await message.reply_text(f"<pre>{html.escape(report[:4000])}</pre>", parse_mode=ParseMode.HTML)
 
 
+async def love_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = require_message(update)
+    user = require_effective_user(update)
+    args = context_args(context)
+    store = get_analytics()
+    if args and args[0].strip().lower() in {"close", "stop", "yop"}:
+        session = store.close_love_session(user.id)
+        if session is None:
+            await message.reply_text("<b>Secret chat</b>\n<i>Aktiv chat topilmadi.</i>", parse_mode=ParseMode.HTML)
+            return
+        other_id = int(session["partner_id"] or 0) if user.id == int(session["owner_id"]) else int(session["owner_id"])
+        await message.reply_text("<b>Secret chat yopildi.</b>", parse_mode=ParseMode.HTML)
+        if other_id:
+            try:
+                await context.bot.send_message(chat_id=other_id, text="<b>Secret chat yopildi.</b>", parse_mode=ParseMode.HTML)
+            except Exception:
+                logger.debug("Love chat close notice yuborilmadi", exc_info=True)
+        record_usage(update, "love", status="closed")
+        return
+
+    if user.id == LOVE_OWNER_ID and (not args or args[0].strip().lower() in {"new", "invite", "link"}):
+        code = make_love_code()
+        store.create_love_invite(user.id, code)
+        bot_user = await context.bot.get_me()
+        link = f"https://t.me/{bot_user.username}?start=love_{code}" if bot_user.username else ""
+        lines = [
+            "<b>Secret chat invite tayyor</b>",
+            f"Kod: <code>{code}</code>",
+            "",
+            "Sherikka shuni yuboring:",
+            f"<code>/love {code}</code>",
+        ]
+        if link:
+            lines.extend(["", "Yoki link:", f"<code>{html.escape(link)}</code>"])
+        lines.append("")
+        lines.append("<i>Chatga kirgan odamga xabarlari anonim sherikka yuborilishi aytiladi.</i>")
+        await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        record_usage(update, "love", status="invite_created")
+        return
+
+    if not args:
+        if user.id == LOVE_OWNER_ID:
+            await message.reply_text(
+                "<b>Secret chat</b>\n<code>/love new</code> - yangi invite\n<code>/love close</code> - chatni yopish",
+                parse_mode=ParseMode.HTML,
+            )
+        return
+
+    code = args[0].strip().upper()
+    session = store.join_love_session(code, user.id, user.full_name)
+    if session is None:
+        await message.reply_text("<b>Secret chat</b>\n<i>Kod noto'g'ri yoki yopilgan.</i>", parse_mode=ParseMode.HTML)
+        record_usage(update, "love", status="bad_code")
+        return
+    if session["partner_id"] and int(session["partner_id"]) != user.id:
+        await message.reply_text("<b>Secret chat</b>\n<i>Bu invite allaqachon band.</i>", parse_mode=ParseMode.HTML)
+        record_usage(update, "love", status="occupied")
+        return
+    await message.reply_text(
+        "<b>Secret chat ochildi.</b>\n"
+        "<i>Bu yerdagi matnlaringiz anonim chat sherigiga yuboriladi. Yopish uchun /love close yozing.</i>",
+        parse_mode=ParseMode.HTML,
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=int(session["owner_id"]),
+            text=(
+                "<b>Secret chatga sherik kirdi.</b>\n"
+                f"Ism: <code>{html.escape(user.full_name)}</code>\n"
+                f"ID: <code>{user.id}</code>\n"
+                "<i>Endi oddiy matn yozsangiz sherikka anonim boradi.</i>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        logger.debug("Love chat owner notice yuborilmadi", exc_info=True)
+    record_usage(update, "love", status="joined")
+
+
+async def maybe_handle_love_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    if is_group_chat(update):
+        return False
+    message = require_message(update)
+    user = require_effective_user(update)
+    session = get_analytics().get_love_session_by_user(user.id)
+    if session is None or not session["partner_id"]:
+        return False
+    owner_id = int(session["owner_id"])
+    partner_id = int(session["partner_id"])
+    if user.id == owner_id:
+        target_id = partner_id
+        prefix = "<b>Anonim xabar</b>"
+    elif user.id == partner_id:
+        target_id = owner_id
+        partner_name = html.escape(str(session["partner_name"] or "Sherik"))
+        prefix = f"<b>Secret chat</b>\n<i>{partner_name}:</i>"
+    else:
+        return False
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=f"{prefix}\n{html.escape(text)[:3800]}",
+            parse_mode=ParseMode.HTML,
+        )
+        await message.reply_text("<i>Yuborildi.</i>", parse_mode=ParseMode.HTML)
+        record_usage(update, "love", text_preview=text)
+    except Exception as exc:
+        logger.exception("Love chat relay failed")
+        await message.reply_text(
+            f"<b>Secret chat xabari yuborilmadi</b>\n<code>{html.escape(friendly_error(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        record_usage(update, "love", status="error", text_preview=text, error=str(exc))
+    return True
+
+
 async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = require_message(update)
     text = " ".join(context_args(context)).strip()
@@ -1253,6 +1492,11 @@ async def kinotop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user = update.effective_user
     if not user or user.id != KINOTOP_OWNER_ID:
         return
+    args = context_args(context)
+    if not args:
+        await message.reply_text("<b>Link yuboring</b>\n<code>/kinotop https://site.com/video</code>", parse_mode=ParseMode.HTML)
+        record_usage(update, "kinotop", status="empty")
+        return
     if not MEDIA_DOWNLOAD_ENABLED:
         await message.reply_text("<b>Media yuklash</b>\n<i>Hozir o'chirilgan.</i>", parse_mode=ParseMode.HTML)
         record_usage(update, "kinotop", status="disabled")
@@ -1264,11 +1508,6 @@ async def kinotop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         record_usage(update, "kinotop", status="not_configured")
         return
-    args = context_args(context)
-    if not args:
-        await message.reply_text("<b>Link yuboring</b>\n<code>/kinotop https://site.com/video</code>", parse_mode=ParseMode.HTML)
-        record_usage(update, "kinotop", status="empty")
-        return
     url = args[0].strip()
     if not URL_RE.fullmatch(url):
         await message.reply_text("<b>Link noto'g'ri</b>\nTo'liq <code>https://...</code> link yuboring.", parse_mode=ParseMode.HTML)
@@ -1279,6 +1518,27 @@ async def kinotop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         record_usage(update, "kinotop", status="domain_blocked", text_preview=get_url_domain(url))
         return
     await handle_media_download(update, url, "video", allow_custom_url=True)
+
+
+async def admin_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = require_message(update)
+    user = update.effective_user
+    if not user or user.id != KINOTOP_OWNER_ID:
+        return
+    lines = [
+        "<b>Admin status</b>",
+        f"AI provider: <code>{html.escape(AI_PROVIDER)}</code>",
+        f"AI model: <code>{html.escape(OPENAI_TEXT_MODEL)}</code>",
+        f"AI key: <code>{'bor' if bool(AI_API_KEY) else 'yoq'}</code>",
+        f"AI base URL: <code>{html.escape(AI_BASE_URL or 'default')}</code>",
+        f"Media download: <code>{'yoqilgan' if MEDIA_DOWNLOAD_ENABLED else 'ochirilgan'}</code>",
+        f"Media max MB: <code>{MEDIA_MAX_MB}</code>",
+        f"Kinotop owner: <code>{KINOTOP_OWNER_ID}</code>",
+        f"Kinotop domenlar: <code>{len(KINOTOP_ALLOWED_DOMAINS)}</code>",
+    ]
+    if KINOTOP_ALLOWED_DOMAINS:
+        lines.append(f"Domenlar: <code>{html.escape(', '.join(sorted(KINOTOP_ALLOWED_DOMAINS)))}</code>")
+    await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def media_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1433,6 +1693,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = require_message(update)
     text = (message.text or "").strip()
+    if await maybe_handle_love_message(update, context, text):
+        return
     urls = URL_RE.findall(text)
     if urls and MEDIA_URL_RE.match(urls[0]):
         user_data = cast(dict[str, Any], context.user_data or {})
@@ -1507,6 +1769,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("radar", radar_command))
     application.add_handler(CommandHandler("necha_yulduz", radar_command))
     application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("love", love_command))
     application.add_handler(CommandHandler("ai", ai_command))
     application.add_handler(CommandHandler("image", image_command))
     application.add_handler(CommandHandler("rasm", image_command))
@@ -1515,6 +1778,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("media", media_command))
     application.add_handler(CommandHandler("yt_ol", media_command))
     application.add_handler(CommandHandler("kinotop", kinotop_command))
+    application.add_handler(CommandHandler("admin_status", admin_status_command))
     application.add_handler(CallbackQueryHandler(media_callback, pattern=r"^media\|"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, greet_new_members))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
