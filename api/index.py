@@ -7,6 +7,7 @@ from pathlib import Path
 from types import ModuleType
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from telegram import Update
 
 
@@ -70,8 +71,299 @@ async def health_check(request: Request) -> dict[str, object]:
         "bot_runtime": "bot.py",
         "base_url": configured_base_url(request),
         "webhook_url": webhook_url_for(request),
-        "next": ["/status", "/ai-health", "/webhook-check", "/setup-webhook", "/force-webhook", "/webhook-info"],
+        "next": ["/dashboard", "/status", "/ai-health", "/webhook-check", "/setup-webhook", "/force-webhook", "/webhook-info"],
     }
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request) -> str:
+    """Interactive dashboard with Vercel Web Analytics."""
+    try:
+        bot = load_bot()
+        bot_imported = True
+        telegram_token = bool(bot.TELEGRAM_BOT_TOKEN)
+        ai_provider = bot.AI_PROVIDER
+        ai_model = bot.OPENAI_TEXT_MODEL
+        bot_initialized = bot.bot_app is not None
+        bot_init_error = bot.bot_init_error
+        
+        # Get webhook info
+        try:
+            application = await bot.get_bot_application()
+            info = await application.bot.get_webhook_info()
+            webhook_url = info.url
+            webhook_pending = info.pending_update_count
+            webhook_error = info.last_error_message or "None"
+        except Exception:
+            webhook_url = "Not set"
+            webhook_pending = 0
+            webhook_error = "Failed to fetch"
+    except Exception as exc:
+        bot_imported = False
+        telegram_token = False
+        ai_provider = "unknown"
+        ai_model = "unknown"
+        bot_initialized = False
+        bot_init_error = str(exc)[:200]
+        webhook_url = "N/A"
+        webhook_pending = 0
+        webhook_error = "N/A"
+    
+    base_url = configured_base_url(request)
+    
+    return f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram AI Bot Dashboard</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+        }}
+        header {{
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }}
+        h1 {{
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }}
+        .subtitle {{
+            font-size: 1.2em;
+            opacity: 0.9;
+        }}
+        .cards {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        .card {{
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }}
+        .card:hover {{
+            transform: translateY(-5px);
+            box-shadow: 0 8px 12px rgba(0,0,0,0.15);
+        }}
+        .card-header {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #f0f0f0;
+        }}
+        .card-icon {{
+            font-size: 2em;
+            margin-right: 10px;
+        }}
+        .card-title {{
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #667eea;
+        }}
+        .status-badge {{
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+            margin: 5px 0;
+        }}
+        .status-ok {{
+            background: #d4edda;
+            color: #155724;
+        }}
+        .status-error {{
+            background: #f8d7da;
+            color: #721c24;
+        }}
+        .info-row {{
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #f5f5f5;
+        }}
+        .info-row:last-child {{
+            border-bottom: none;
+        }}
+        .info-label {{
+            font-weight: 600;
+            color: #666;
+        }}
+        .info-value {{
+            color: #333;
+            text-align: right;
+            max-width: 60%;
+            word-break: break-word;
+        }}
+        .links {{
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        .links h2 {{
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+        }}
+        .link-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+        }}
+        .link-button {{
+            display: block;
+            padding: 12px 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }}
+        .link-button:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }}
+        footer {{
+            text-align: center;
+            color: white;
+            margin-top: 40px;
+            opacity: 0.8;
+        }}
+        .error-message {{
+            background: #f8d7da;
+            color: #721c24;
+            padding: 10px;
+            border-radius: 6px;
+            margin-top: 10px;
+            font-size: 0.9em;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Telegram AI Bot</h1>
+            <p class="subtitle">Real-time Status Dashboard</p>
+        </header>
+
+        <div class="cards">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-icon">🔧</span>
+                    <h2 class="card-title">System Status</h2>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Bot Imported:</span>
+                    <span class="info-value">
+                        <span class="status-badge {'status-ok' if bot_imported else 'status-error'}">
+                            {'✓ OK' if bot_imported else '✗ Error'}
+                        </span>
+                    </span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Bot Initialized:</span>
+                    <span class="info-value">
+                        <span class="status-badge {'status-ok' if bot_initialized else 'status-error'}">
+                            {'✓ Yes' if bot_initialized else '✗ No'}
+                        </span>
+                    </span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Telegram Token:</span>
+                    <span class="info-value">
+                        <span class="status-badge {'status-ok' if telegram_token else 'status-error'}">
+                            {'✓ Set' if telegram_token else '✗ Missing'}
+                        </span>
+                    </span>
+                </div>
+                {f'<div class="error-message">Error: {bot_init_error}</div>' if bot_init_error else ''}
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-icon">🤖</span>
+                    <h2 class="card-title">AI Configuration</h2>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Provider:</span>
+                    <span class="info-value">{ai_provider}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Model:</span>
+                    <span class="info-value">{ai_model}</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-icon">🔗</span>
+                    <h2 class="card-title">Webhook Status</h2>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">URL:</span>
+                    <span class="info-value">{webhook_url if webhook_url else 'Not configured'}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Pending Updates:</span>
+                    <span class="info-value">{webhook_pending}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Last Error:</span>
+                    <span class="info-value">{webhook_error}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="links">
+            <h2>🔗 Quick Links</h2>
+            <div class="link-grid">
+                <a href="{base_url}/status" class="link-button">📊 Status JSON</a>
+                <a href="{base_url}/ai-health" class="link-button">🧠 AI Health</a>
+                <a href="{base_url}/webhook-info" class="link-button">🔗 Webhook Info</a>
+                <a href="{base_url}/webhook-check" class="link-button">✅ Check Webhook</a>
+                <a href="{base_url}/setup-webhook" class="link-button">⚙️ Setup Webhook</a>
+                <a href="{base_url}/cron/weekly" class="link-button">📈 Weekly Report</a>
+            </div>
+        </div>
+
+        <footer>
+            <p>Telegram AI Bot Dashboard • Powered by FastAPI & Vercel</p>
+        </footer>
+    </div>
+
+    <!-- Vercel Web Analytics -->
+    <script>
+        window.va = window.va || function () {{ (window.vaq = window.vaq || []).push(arguments); }};
+    </script>
+    <script defer src="/_vercel/insights/script.js"></script>
+</body>
+</html>
+"""
 
 
 @app.get("/favicon.ico")

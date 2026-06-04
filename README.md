@@ -102,11 +102,23 @@ https://YOUR-VERCEL-DOMAIN.vercel.app/setup-webhook
 Tekshirish endpointlari:
 
 ```text
+/dashboard        # Interactive HTML dashboard with Vercel Analytics
 /status
 /ai-health
 /webhook-info
 /cron/weekly
 ```
+
+## Dashboard
+
+Proyekt `/dashboard` endpointida interaktiv HTML dashboardga ega. Dashboard quyidagilarni ko'rsatadi:
+
+- Bot holati va konfiguratsiya
+- AI provider va model ma'lumotlari
+- Webhook holati
+- Tezkor havola tugmalari barcha API endpointlariga
+
+Dashboard Vercel Web Analytics bilan integratsiya qilingan, shuning uchun Vercel Analytics dashboard orqali ziyorat statistikasini ko'rishingiz mumkin.
 
 ## Komandalar
 
